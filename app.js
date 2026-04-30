@@ -101,21 +101,32 @@ async function fileToDataUrl(file) {
 // Загрузка фото: если Supabase настроен и авторизован — в Storage, иначе DataURL (локально)
 async function handlePhotoFile(file) {
   const sbConfigured = CONFIG.supabase.url !== 'https://YOURPROJECT.supabase.co';
-  if (sbConfigured && State.user && navigator.onLine && window.ImageKit) {
-    try {
-      const url = await ImageKit.uploadFile(file);
-      console.log('[Storage] Uploaded:', url);
-      return url;
-    } catch(e) {
-      // Показываем реальную ошибку чтобы знать что происходит
-      console.error('[Storage] Upload failed:', e.message);
-      toast(`Фото не загружено в облако: ${e.message}`, 'error', 4000);
-      // Fallback в IndexedDB
-    }
+  if (!sbConfigured || !navigator.onLine || !window.ImageKit) {
+    return resizeImageDataUrl(await fileToDataUrl(file));
   }
-  // Fallback: сжимаем и храним как DataURL в IndexedDB
-  console.log('[Storage] Saving locally (no auth or offline)');
-  return resizeImageDataUrl(await fileToDataUrl(file));
+
+  // State.user может быть null из-за race condition при старте —
+  // перепроверяем напрямую через Supabase SDK
+  let user = State.user;
+  if (!user) {
+    user = await Auth.current();
+    if (user) State.user = user; // восстанавливаем State
+  }
+
+  if (!user) {
+    console.warn('[Storage] Not authenticated, saving locally');
+    return resizeImageDataUrl(await fileToDataUrl(file));
+  }
+
+  try {
+    const url = await ImageKit.uploadFile(file);
+    console.log('[Storage] Uploaded:', url);
+    return url;
+  } catch(e) {
+    console.error('[Storage] Upload failed:', e.message);
+    toast(`Фото: ${e.message}`, 'error', 4000);
+    return resizeImageDataUrl(await fileToDataUrl(file));
+  }
 }
 
 // ── Cropper ────────────────────────────────────────────────────────
