@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#7c3474">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="PSBase">
+  <meta name="description" content="PSBase — Offline Model Collection">
+  <title>PSBase</title>
+  <link rel="manifest" href="manifest.json">
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+
+  <!-- Cropper.js CSS -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
+
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <header class="top-bar" id="top-bar">
+    <span class="logo">PSBase</span>
+  </header>
+
+  <div class="toast-container" id="toasts"></div>
+
+  <!-- Views -->
+  <main class="view" id="view-home"></main>
+  <main class="view" id="view-search"></main>
+  <main class="view" id="view-favorites"></main>
+  <main class="view" id="view-stats"></main>
+  <main class="view" id="view-settings"></main>
+  <main class="view" id="view-detail"></main>
+  <main class="view" id="view-add"></main>
+  <main class="view" id="view-edit"></main>
+  <main class="view" id="view-bans"></main>
+  <main class="view" id="view-tags"></main>
+
+  <!-- Bottom Navigation -->
+  <nav class="bottom-nav">
+    <button class="nav-btn active" data-nav="home"><span class="nav-icon">🏠</span><span class="nav-label">Главная</span></button>
+    <button class="nav-btn" data-nav="search"><span class="nav-icon">🔍</span><span class="nav-label">Поиск</span></button>
+    <button class="nav-btn" data-nav="favorites"><span class="nav-icon">★</span><span class="nav-label">Избранное</span></button>
+    <button class="nav-btn" data-nav="stats"><span class="nav-icon">📊</span><span class="nav-label">Статистика</span></button>
+    <button class="nav-btn" data-nav="settings"><span class="nav-icon">⚙️</span><span class="nav-label">Настройки</span></button>
+  </nav>
+
+</div>
+
+<!-- ══ Внешние библиотеки ══ -->
+<!-- Dexie.js (IndexedDB) -->
+<script src="https://unpkg.com/dexie@3.2.4/dist/dexie.js"></script>
+<!-- Cropper.js -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.js"></script>
+<!-- Supabase JS v2 — ЗАПОЛНИТЬ КЛЮЧИ В config.js, затем раскомментировать -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+
+<!-- ══ PSBase ══ -->
+<!-- 1. Конфиг (ключи) — заполните своими данными -->
+<script src="config.js"></script>
+<!-- 2. База данных (Dexie схема + CRUD) -->
+<script src="db.js"></script>
+<!-- 3. Supabase клиент + Auth -->
+<script src="sync/supabase-client.js"></script>
+<!-- 4. Storage + ImageKit трансформации -->
+<script src="sync/imagekit.js"></script>
+<!-- 5. SyncManager (очередь, push/pull) -->
+<script src="sync/strategy.js"></script>
+<!-- 6. DDG Image Search -->
+<script src="sync/ddg-images.js"></script>
+<!-- 7. UI -->
+<script src="app.js"></script>
+
+</body>
+</html>
