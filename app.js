@@ -109,12 +109,18 @@ async function handlePhotoFile(file) {
   // перепроверяем напрямую через Supabase SDK
   let user = State.user;
   if (!user) {
-    user = await Auth.current();
-    if (user) State.user = user; // восстанавливаем State
+    try {
+      const { data } = await getSupabase().auth.getSession();
+      user = data?.session?.user ?? null;
+      console.log('[Auth] getSession result:', user?.email ?? 'null');
+      if (user) State.user = user;
+    } catch(e) {
+      console.error('[Auth] getSession failed:', e.message);
+    }
   }
 
   if (!user) {
-    console.warn('[Storage] Not authenticated, saving locally');
+    console.warn('[Storage] Still no user after getSession — saving locally');
     return resizeImageDataUrl(await fileToDataUrl(file));
   }
 
