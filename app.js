@@ -5,6 +5,7 @@
 const State = {
   view: 'home', detailId: null, editingId: null,
   filters: { q:'', favorites:false, country:'', sort:'date_added_desc', overallMin:0, overallMax:9999 },
+  gridColumns: parseInt(localStorage.getItem('psbase-grid-columns'), 10) || 2,
   user: null,
   // Пагинация
   page: { current: 0, pageSize: 20, total: 0, allList: [], observer: null },
@@ -100,13 +101,6 @@ async function fileToDataUrl(file) {
 
 // Загрузка фото: если Supabase настроен и авторизован — в Storage, иначе DataURL (локально)
 async function handlePhotoFile(file) {
-  console.log('[DEBUG]', {
-    url: CONFIG.supabase.url,
-    sbConfigured: CONFIG.supabase.url !== 'https://YOURPROJECT.supabase.co',
-    online: navigator.onLine,
-    hasIK: !!window.ImageKit,
-  });
-
   const sbConfigured = CONFIG.supabase.url !== 'https://YOURPROJECT.supabase.co';
   if (!sbConfigured || !navigator.onLine || !window.ImageKit) {
     return resizeImageDataUrl(await fileToDataUrl(file));
@@ -274,12 +268,19 @@ async function renderHome() {
         <option value="name_asc">Имя А-Я</option>
         <option value="drops_desc">Drops ↓</option>
       </select>
+      <select class="sort-select" id="cols-sel" onchange="applyColumns(this.value)" title="Число колонок">
+        <option value="2">2 столбца</option>
+        <option value="3">3 столбца</option>
+        <option value="4">4 столбца</option>
+        <option value="5">5 столбцов</option>
+      </select>
       <button class="filter-chip${State.filters.favorites?' active':''}" onclick="toggleFavF()">★ Любимчики</button>
     </div>
     <div class="models-grid" id="mg"></div>
     <div id="mg-empty"></div>
     <button class="btn-fab" onclick="nav('add')">+</button>`;
   document.getElementById('sort-sel').value = State.filters.sort;
+  document.getElementById('cols-sel').value = State.gridColumns;
   document.getElementById('hs').addEventListener('input', debounce(e=>{ State.filters.q=e.target.value; reloadGrid(); },280));
   await buildCountryChips();
   await reloadGrid();
@@ -300,6 +301,8 @@ async function manualSync() {
 function hsClear() { State.filters.q=''; const el=document.getElementById('hs'); if(el) el.value=''; State.page.current=0; reloadGrid(); }
 function toggleFavF() { State.filters.favorites=!State.filters.favorites; State.page.current=0; renderHome(); }
 function applySort(v) { State.filters.sort=v; State.page.current=0; reloadGrid(); }
+function applyColumns(v) { State.gridColumns = Math.max(2, Math.min(5, Number(v) || 2)); localStorage.setItem('psbase-grid-columns', State.gridColumns); State.page.current=0; reloadGrid(); }
+function applyGridColumns(el) { if (!el) return; el.style.gridTemplateColumns = `repeat(${State.gridColumns}, 1fr)`; }
 
 async function buildCountryChips() {
   const all = await Models.getAll();
@@ -391,6 +394,8 @@ async function reloadGrid() {
   const me = document.getElementById('mg-empty');
   if (!mg) return;
 
+  applyGridColumns(mg);
+
   // Отключаем старый observer
   if (State.page.observer) { State.page.observer.disconnect(); State.page.observer = null; }
   const oldSentinel = document.getElementById('pg-sentinel');
@@ -453,6 +458,7 @@ function sRes(list) {
   const c=document.getElementById('sres'); if(!c) return;
   if (!list.length) { c.innerHTML=`<div class="empty-state"><div class="es-icon">🔍</div><div class="es-title">Ничего не найдено</div></div>`; return; }
   const g=document.createElement('div'); g.className='models-grid';
+  applyGridColumns(g);
   list.forEach(m=>g.appendChild(modelCard(m,null,null)));
   c.innerHTML=''; c.appendChild(g);
 }
@@ -464,6 +470,7 @@ async function renderFavorites() {
   const favs=(await Models.getAll()).filter(m=>m.is_favorite).sort((a,b)=>(b.overall||0)-(a.overall||0));
   if (!favs.length) { v.innerHTML=`<div class="empty-state"><div class="es-icon">★</div><div class="es-title">Нет любимчиков</div></div>`; return; }
   const g=document.createElement('div'); g.className='models-grid';
+  applyGridColumns(g);
   favs.forEach(m=>g.appendChild(modelCard(m,null,null)));
   v.innerHTML=''; v.appendChild(g);
 }
