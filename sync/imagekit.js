@@ -163,3 +163,5 @@ const ImageKit = {
     return upd;
   },
 };
+
+window.ImageKit = ImageKit;
