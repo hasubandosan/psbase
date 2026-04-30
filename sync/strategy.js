@@ -235,27 +235,17 @@ const SyncManager = {
 
     let data, error;
 
-    if (record.remote_id) {
-      // Запись уже есть на сервере — UPDATE по известному uuid
-      ({ data, error } = await sb
-        .from(remoteTbl)
-        .update(row)
-        .eq('id', record.remote_id)
-        .select('id')
-        .single());
-    } else {
-      // Новая запись — INSERT/upsert, разрешаем конфликт по local_id+user_id
-      const { id: _rid, ...rowWithoutId } = row; // убираем id=undefined из объекта
-      ({ data, error } = await sb
-        .from(remoteTbl)
-        .upsert(rowWithoutId, { onConflict: 'local_id,user_id', ignoreDuplicates: false })
-        .select('id')
-        .single());
-    }
+    // Всегда делаем upsert по local_id+user_id, чтобы не зависеть от устаревшего remote_id
+    const { id: _rid, ...rowWithoutId } = row; // убираем id=undefined из объекта
+    ({ data, error } = await sb
+      .from(remoteTbl)
+      .upsert(rowWithoutId, { onConflict: 'local_id,user_id', ignoreDuplicates: false })
+      .select('id')
+      .single());
 
     if (error) throw error;
-    if (data?.id && !record.remote_id) {
-      // Сохраняем полученный remote_id в IndexedDB
+    if (data?.id) {
+      // Сохраняем полученный remote_id, даже если он уже был
       await db[op.table]?.update(parseInt(op.recordId), { remote_id: data.id });
     }
   },
