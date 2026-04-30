@@ -37,24 +37,29 @@ const ImageKit = {
   // ── Загрузка в Supabase Storage ───────────────────────────────
   // Возвращает публичный URL или кидает ошибку
   async upload(blob, fileName, folder = 'models') {
-    const sb = getSupabase();
-    const path = `${folder}/${Date.now()}-${fileName}`;
+    const sb   = getSupabase();
+    // Уникальное имя — никогда не будет конфликта
+    const ext  = 'webp';
+    const safe = fileName.replace(/[^a-z0-9]/gi, '_').slice(0, 40);
+    const path = `${folder}/${Date.now()}_${safe}.${ext}`;
 
     const { error } = await sb.storage
       .from('photos')
-      .upload(path, blob, { contentType: 'image/webp', upsert: false });
+      .upload(path, blob, { contentType: 'image/webp', upsert: true });
 
     if (error) throw new Error(`Storage upload failed: ${error.message}`);
 
     const { data } = sb.storage.from('photos').getPublicUrl(path);
+    if (!data?.publicUrl) throw new Error('Storage: не удалось получить publicUrl');
     return data.publicUrl;
   },
 
   // ── Загрузка из File (форма) ──────────────────────────────────
   async uploadFile(file, folder = 'models') {
     const compressed = await this.compress(file);
-    const safeName   = file.name.replace(/[^a-z0-9.]/gi, '_');
-    return this.upload(compressed, safeName, folder);
+    // Имя без расширения — add() добавит .webp
+    const baseName = (file.name || 'photo').replace(/\.[^.]+$/, '');
+    return this.upload(compressed, baseName, folder);
   },
 
   // ── Загрузка из dataURL (миграция старых base64) ──────────────

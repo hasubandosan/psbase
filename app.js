@@ -1131,25 +1131,45 @@ async function castingSearch() {
     res.innerHTML = '';
 
     if (!results.length) {
-      if (emp) emp.innerHTML = `<div class="empty-state"><div class="es-icon">🖼</div><div class="es-title">Ничего не найдено</div><div class="es-text">Попробуйте другой запрос</div></div>`;
+      if (emp) emp.innerHTML = `<div class="empty-state">
+        <div class="es-icon">🖼</div>
+        <div class="es-title">Ничего не найдено</div>
+        <div class="es-text">Попробуйте другой запрос</div>
+      </div>`;
       return;
     }
 
     results.forEach(img => {
       const card = document.createElement('div');
       card.className = 'cast-card';
+      // Экранируем URL для onclick через data-атрибут — безопаснее чем inline
       card.innerHTML = `
         <img src="${escHtml(img.thumb)}" alt="${escHtml(img.title)}" loading="lazy"
              onerror="this.parentElement.style.display='none'">
         <div class="cast-card-actions">
-          <button class="cast-use-btn" onclick="castingUsePhoto('${escHtml(img.full)}')">Использовать</button>
+          <button class="cast-use-btn">Использовать</button>
         </div>`;
-      card.querySelector('img').onclick = () => viewImg(img.full);
+      card.querySelector('img').onclick         = () => viewImg(img.full);
+      card.querySelector('.cast-use-btn').onclick = () => castingUsePhoto(img.full);
       res.appendChild(card);
     });
   } catch(e) {
     res.innerHTML = '';
-    if (emp) emp.innerHTML = `<div class="empty-state"><div class="es-icon">⚠️</div><div class="es-title">Ошибка поиска</div><div class="es-text">${escHtml(e.message)}</div></div>`;
+    // Показываем конкретную ошибку + подсказку
+    const isSetup = e.message.includes('500') || e.message.includes('SERPER') || e.message.includes('secrets');
+    if (emp) emp.innerHTML = `<div class="empty-state">
+      <div class="es-icon">⚠️</div>
+      <div class="es-title">Ошибка поиска</div>
+      <div class="es-text" style="text-align:left;max-width:300px;margin:0 auto">
+        ${escHtml(e.message)}
+        ${isSetup ? `<br><br>
+        <strong style="color:var(--gold)">Как исправить:</strong><br>
+        1. Зарегистрируйся на <a href="https://serper.dev" target="_blank" style="color:var(--accent-light)">serper.dev</a><br>
+        2. Скопируй API key<br>
+        3. В Supabase Dashboard → Edge Functions → Secrets → добавь <code style="background:var(--surface2);padding:1px 5px;border-radius:4px">SERPER_API_KEY</code><br>
+        4. Задеплой функцию заново` : ''}
+      </div>
+    </div>`;
   }
 }
 
