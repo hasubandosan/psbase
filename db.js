@@ -156,7 +156,7 @@ async function processPhotoForSave(dataUrlOrFile) {
   // Уже ImageKit URL — не трогаем
   if (typeof dataUrlOrFile === 'string' && !dataUrlOrFile.startsWith('data:')) return dataUrlOrFile;
   // Если ImageKit сконфигурирован — пробуем загрузить
-  if (window.ImageKit && window.SyncManager && navigator.onLine && CONFIG.imagekit.publicKey !== 'YOUR_IMAGEKIT_PUBLIC_KEY') {
+  if (window.ImageKit && window.SyncManager && navigator.onLine) {
     try {
       if (typeof dataUrlOrFile === 'string') {
         return await ImageKit.uploadDataUrl(dataUrlOrFile, `photo-${Date.now()}`);
@@ -177,6 +177,12 @@ const Models = {
   async add(data) {
     await checkDuplicate(data.name, data.aliases);
     const scores = await computeModelScores(data);
+
+    // Обработаем фото
+    data.main_photo = await processPhotoForSave(data.main_photo);
+    data.body_part_photos = Object.fromEntries(await Promise.all(Object.entries(data.body_part_photos || {}).map(async ([k,v]) => [k, await processPhotoForSave(v)])));
+    data.extra_photos = await Promise.all((data.extra_photos || []).map(async v => await processPhotoForSave(v)));
+
     const localId = await db.models.add({
       ...data,
       name:             data.name.trim(),
@@ -202,12 +208,33 @@ const Models = {
   async update(id, data) {
     await checkDuplicate(data.name, data.aliases, id);
     const scores = await computeModelScores(data);
+
+    // Обработаем фото
+    data.main_photo = await processPhotoForSave(data.main_photo);
+    data.body_part_photos = Object.fromEntries(await Promise.all(Object.entries(data.body_part_photos || {}).map(async ([k,v]) => [k, await processPhotoForSave(v)])));
+    data.extra_photos = await Promise.all((data.extra_photos || []).map(async v => await processPhotoForSave(v)));
+
+    // Соберем старые URL фото перед обновлением
+    const oldModel = await db.models.get(id);
+    const oldUrls = oldModel ? ImageKit.collectModelUrls(oldModel) : [];
+
     await db.models.update(id, {
       ...data, name:data.name.trim(),
       age:calcAge(data.date_of_birth),
       overall:scores.overall, potential:scores.potential,
       _local_updated: Date.now(),
     });
+
+    // Удалим старые фото, которые больше не используются
+    if (window.ImageKit && navigator.onLine) {
+      try {
+        const newModel = await db.models.get(id);
+        const newUrls = newModel ? ImageKit.collectModelUrls(newModel) : [];
+        const toDelete = oldUrls.filter(u => !newUrls.includes(u));
+        if (toDelete.length) await ImageKit.deleteUrls(toDelete);
+      } catch(e) { console.warn('Storage photo delete failed:', e.message); }
+    }
+
     if (window.SyncManager) {
       await SyncManager.enqueue('models','upsert',id);
       if (navigator.onLine) SyncManager.flush();

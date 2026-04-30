@@ -79,7 +79,11 @@ const ImageKit = {
   _tr(url, params) {
     if (!url || url.startsWith('data:')) return url;
     // Supabase transform: /storage/v1/render/image/public/...?width=300&quality=70
-    const base = url.replace('/storage/v1/object/public/', '/storage/v1/render/image/public/');
+    let base = url.replace('/storage/v1/object/public/', '/storage/v1/render/image/public/');
+    // Если уже render, уберем старые параметры
+    if (base.includes('/render/image/public/')) {
+      base = base.split('?')[0];
+    }
     return `${base}?${params}&format=webp`;
   },
   thumb(url)  { return this._tr(url, `width=${CONFIG.image.thumbWidth}&quality=70`); },
@@ -92,10 +96,10 @@ const ImageKit = {
 
   // ── Извлечь path из публичного URL Supabase Storage ─────────────
   // https://xxx.supabase.co/storage/v1/object/public/photos/models/123.webp
-  // → models/123.webp
+  // или /storage/v1/render/image/public/photos/models/123.webp?...
   _pathFromUrl(url) {
     if (!url || url.startsWith('data:')) return null;
-    const marker = '/object/public/photos/';
+    const marker = '/photos/';
     const idx = url.indexOf(marker);
     if (idx === -1) return null;
     return url.slice(idx + marker.length).split('?')[0];
