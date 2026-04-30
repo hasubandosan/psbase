@@ -26,6 +26,16 @@ db.version(6).stores({
   syncMeta:   'key'
 });
 
+// v7: _local_updated для правильного conflict resolution при pull
+db.version(7).stores({
+  models:     '++id, name, country, is_favorite, drops, overall, potential, date_added, remote_id, _local_updated',
+  tags:       '++id, name, remote_id, _local_updated',
+  banRecords: '++id, name, reason, date_added, remote_id, _local_updated',
+  settings:   'key',
+  syncQueue:  '++id, [table+operation+recordId], createdAt',
+  syncMeta:   'key'
+});
+
 // ── Rating Levels ─────────────────────────────────────────────────
 const RATING_LEVELS = {
   face:      [ {label:'Плохо',value:2}, {label:'Обычно',value:5}, {label:'Симпатично',value:7.5}, {label:'МОДЕЛЬ',value:10} ],
@@ -180,6 +190,7 @@ const Models = {
       extra_photos:     data.extra_photos     || [],
       links:            data.links            || [],
       date_added:       Date.now(),
+      _local_updated:   Date.now(),
     });
     if (window.SyncManager) {
       await SyncManager.enqueue('models','upsert',localId);
@@ -195,6 +206,7 @@ const Models = {
       ...data, name:data.name.trim(),
       age:calcAge(data.date_of_birth),
       overall:scores.overall, potential:scores.potential,
+      _local_updated: Date.now(),
     });
     if (window.SyncManager) {
       await SyncManager.enqueue('models','upsert',id);
@@ -221,7 +233,7 @@ const Models = {
   async changeDrop(id, delta) {
     const m = await db.models.get(id);
     const next = Math.max(0,(m.drops||0)+delta);
-    await db.models.update(id,{drops:next});
+    await db.models.update(id,{drops:next, _local_updated: Date.now()});
     if (window.SyncManager) {
       await SyncManager.enqueue('models','upsert',id);
       if (navigator.onLine) SyncManager.flush();
@@ -232,7 +244,7 @@ const Models = {
   async toggleFavorite(id) {
     const m = await db.models.get(id);
     const val = !m.is_favorite;
-    await db.models.update(id,{is_favorite:val});
+    await db.models.update(id,{is_favorite:val, _local_updated: Date.now()});
     if (window.SyncManager) {
       await SyncManager.enqueue('models','upsert',id);
       if (navigator.onLine) SyncManager.flush();
@@ -276,12 +288,12 @@ const Models = {
 const Tags = {
   async getAll() { return db.tags.orderBy('name').toArray(); },
   async add(d) {
-    const localId = await db.tags.add({ icon:d.icon||'🏷️', name:d.name.trim(), weight:parseFloat(d.weight)||1.0 });
+    const localId = await db.tags.add({ icon:d.icon||'🏷️', name:d.name.trim(), weight:parseFloat(d.weight)||1.0, _local_updated: Date.now() });
     if (window.SyncManager) { await SyncManager.enqueue('tags','upsert',localId); if(navigator.onLine) SyncManager.flush(); }
     return localId;
   },
   async update(id,d) {
-    await db.tags.update(id,{ icon:d.icon, name:d.name.trim(), weight:parseFloat(d.weight)||1.0 });
+    await db.tags.update(id,{ icon:d.icon, name:d.name.trim(), weight:parseFloat(d.weight)||1.0, _local_updated: Date.now() });
     if (window.SyncManager) { await SyncManager.enqueue('tags','upsert',id); if(navigator.onLine) SyncManager.flush(); }
   },
   async delete(id) {
@@ -296,7 +308,7 @@ const Tags = {
 const BanRecords = {
   async getAll() { return db.banRecords.orderBy('date_added').reverse().toArray(); },
   async add(d) {
-    const localId = await db.banRecords.add({ name:d.name.trim(), reason:d.reason, description:d.description||'', date_added:Date.now() });
+    const localId = await db.banRecords.add({ name:d.name.trim(), reason:d.reason, description:d.description||'', date_added:Date.now(), _local_updated: Date.now() });
     if (window.SyncManager) { await SyncManager.enqueue('banRecords','upsert',localId); if(navigator.onLine) SyncManager.flush(); }
     return localId;
   },

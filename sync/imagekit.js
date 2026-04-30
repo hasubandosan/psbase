@@ -157,6 +157,7 @@ const ImageKit = {
         main_photo:       upd.main_photo,
         body_part_photos: upd.body_part_photos,
         extra_photos:     upd.extra_photos,
+        _local_updated:   Date.now(),
       });
       if (window.SyncManager) await SyncManager.enqueue('models', 'upsert', model.id);
     }

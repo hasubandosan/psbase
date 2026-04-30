@@ -9,7 +9,7 @@ const TABLE_MAP = {
 
 // ── local → remote ────────────────────────────────────────────────
 function toRemote(table, local, userId) {
-  const base = { user_id: userId, updated_at: new Date().toISOString() };
+  const base = { user_id: userId, updated_at: new Date(local._local_updated || Date.now()).toISOString() };
 
   if (table === 'models') return {
     ...base,
@@ -101,6 +101,7 @@ function toLocal(table, remote) {
     extra_photos:     jp(remote.extra_photos,     []),
     date_added:       remote.created_at ? new Date(remote.created_at).getTime() : Date.now(),
     _remote_updated:  remote.updated_at,
+    _local_updated:   remote.updated_at ? new Date(remote.updated_at).getTime() : Date.now(),
   };
 
   if (table === 'tags') return {
@@ -108,6 +109,7 @@ function toLocal(table, remote) {
     icon:      remote.icon   || '🏷️',
     name:      remote.name,
     weight:    remote.weight || 1.0,
+    _local_updated: remote.updated_at ? new Date(remote.updated_at).getTime() : Date.now(),
   };
 
   if (table === 'banRecords') return {
@@ -116,6 +118,7 @@ function toLocal(table, remote) {
     reason:      remote.reason      || '',
     description: remote.description || '',
     date_added:  remote.created_at ? new Date(remote.created_at).getTime() : Date.now(),
+    _local_updated: remote.updated_at ? new Date(remote.updated_at).getTime() : Date.now(),
   };
 
   return remote;
@@ -276,9 +279,9 @@ const SyncManager = {
           const existing  = await db[localTbl].where('remote_id').equals(row.id).first().catch(() => null);
 
           if (existing) {
-            // Conflict resolution: newer updated_at wins
+            // Conflict resolution: compare remote updated_at with local _local_updated
             const remoteTs = new Date(row.updated_at).getTime();
-            const localTs  = existing._remote_updated ? new Date(existing._remote_updated).getTime() : 0;
+            const localTs  = existing._local_updated || existing.date_added || 0;
             if (remoteTs > localTs) {
               await db[localTbl].update(existing.id, { ...localObj, id: existing.id });
             }
