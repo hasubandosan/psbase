@@ -64,7 +64,10 @@ const ImageKit = {
 
   // ── Загрузка из dataURL (миграция старых base64) ──────────────
   async uploadDataUrl(dataUrl, baseName, folder = 'models') {
-    if (!dataUrl || !dataUrl.startsWith('data:')) return dataUrl; // уже URL
+    if (!dataUrl || !dataUrl.startsWith('data:')) {
+      // Если уже URL, нормализуем
+      return dataUrl.split('?')[0];
+    }
     try {
       const blob = await this.compressFromDataUrl(dataUrl);
       return await this.upload(blob, `${baseName}.webp`, folder);

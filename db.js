@@ -153,8 +153,12 @@ async function checkDuplicate(name, aliases, excludeId=null) {
 // иначе возвращает DataURL как раньше — прозрачный fallback
 async function processPhotoForSave(dataUrlOrFile) {
   if (!dataUrlOrFile) return '';
-  // Уже ImageKit URL — не трогаем
-  if (typeof dataUrlOrFile === 'string' && !dataUrlOrFile.startsWith('data:')) return dataUrlOrFile;
+  // Уже ImageKit URL — нормализуем, уберем параметры
+  if (typeof dataUrlOrFile === 'string' && !dataUrlOrFile.startsWith('data:')) {
+    // Уберем параметры трансформации, оставим чистый URL
+    const url = dataUrlOrFile.split('?')[0];
+    return url;
+  }
   // Если ImageKit сконфигурирован — пробуем загрузить
   if (window.ImageKit && window.SyncManager && navigator.onLine) {
     try {
