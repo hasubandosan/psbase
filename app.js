@@ -100,6 +100,13 @@ async function fileToDataUrl(file) {
 
 // Загрузка фото: если Supabase настроен и авторизован — в Storage, иначе DataURL (локально)
 async function handlePhotoFile(file) {
+  console.log('[DEBUG]', {
+    url: CONFIG.supabase.url,
+    sbConfigured: CONFIG.supabase.url !== 'https://YOURPROJECT.supabase.co',
+    online: navigator.onLine,
+    hasIK: !!window.ImageKit,
+  });
+
   const sbConfigured = CONFIG.supabase.url !== 'https://YOURPROJECT.supabase.co';
   if (!sbConfigured || !navigator.onLine || !window.ImageKit) {
     return resizeImageDataUrl(await fileToDataUrl(file));
