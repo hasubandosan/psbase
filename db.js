@@ -364,12 +364,12 @@ const DataIO = {
 };
 
 // ── Seed ─────────────────────────────────────────────────────────
-async function seedDemoData() {
-  if (await db.models.count()>0) return;
-  const t1=await Tags.add({icon:'🌹',name:'Классика',weight:1.05});
-  const t2=await Tags.add({icon:'✨',name:'Топ',weight:1.1});
-  const t3=await Tags.add({icon:'🎭',name:'Актриса',weight:1.0});
-  await Models.add({name:'Aurora Voss',aliases:'Aurora V, A.Voss',country:'🇩🇪 Германия',date_of_birth:'1998-03-15',height:172,weight:55,shoulder_size:38,main_photo:'',body_part_photos:{},extra_photos:[],links:[],tags:[t1,t2],is_favorite:true,drops:12,face_rate:9.5,shoulders_rate:7.5,waist_rate:10,hips_rate:9.5,figure_rate:10});
-  await Models.add({name:'Stella Blanc',aliases:'S.Blanc',country:'🇫🇷 Франция',date_of_birth:'2001-07-22',height:168,weight:52,shoulder_size:36,main_photo:'',body_part_photos:{},extra_photos:[],links:[],tags:[t2,t3],is_favorite:false,drops:5,face_rate:9.5,shoulders_rate:7.5,waist_rate:5,hips_rate:7.5,figure_rate:10});
-  await Models.add({name:'Nadia Cruz',aliases:'',country:'🇧🇷 Бразилия',date_of_birth:'1995-11-08',height:175,weight:60,shoulder_size:40,main_photo:'',body_part_photos:{},extra_photos:[],links:[],tags:[t1],is_favorite:false,drops:8,face_rate:7.5,shoulders_rate:7.5,waist_rate:5,hips_rate:10,figure_rate:10});
-}
+// async function seedDemoData() {
+//   if (await db.models.count()>0) return;
+//   const t1=await Tags.add({icon:'🌹',name:'Классика',weight:1.05});
+//   const t2=await Tags.add({icon:'✨',name:'Топ',weight:1.1});
+//   const t3=await Tags.add({icon:'🎭',name:'Актриса',weight:1.0});
+//   await Models.add({name:'Aurora Voss',aliases:'Aurora V, A.Voss',country:'🇩🇪 Германия',date_of_birth:'1998-03-15',height:172,weight:55,shoulder_size:38,main_photo:'',body_part_photos:{},extra_photos:[],links:[],tags:[t1,t2],is_favorite:true,drops:12,face_rate:9.5,shoulders_rate:7.5,waist_rate:10,hips_rate:9.5,figure_rate:10});
+//   await Models.add({name:'Stella Blanc',aliases:'S.Blanc',country:'🇫🇷 Франция',date_of_birth:'2001-07-22',height:168,weight:52,shoulder_size:36,main_photo:'',body_part_photos:{},extra_photos:[],links:[],tags:[t2,t3],is_favorite:false,drops:5,face_rate:9.5,shoulders_rate:7.5,waist_rate:5,hips_rate:7.5,figure_rate:10});
+//   await Models.add({name:'Nadia Cruz',aliases:'',country:'🇧🇷 Бразилия',date_of_birth:'1995-11-08',height:175,weight:60,shoulder_size:40,main_photo:'',body_part_photos:{},extra_photos:[],links:[],tags:[t1],is_favorite:false,drops:8,face_rate:7.5,shoulders_rate:7.5,waist_rate:5,hips_rate:10,figure_rate:10});
+// }

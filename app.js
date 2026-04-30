@@ -210,7 +210,7 @@ async function doSignUp() {
 
 async function continueOffline() {
   document.querySelector('.bottom-nav').style.display='';
-  await seedDemoData();
+  // await seedDemoData();
   nav('home');
 }
 
@@ -224,7 +224,7 @@ async function onUserSignedIn(user) {
     SyncManager._listenersStarted = true;
   }
   toast('Добро пожаловать!', 'success', 2000);
-  await seedDemoData();
+  // await seedDemoData();
   nav('home');
   updateSyncIndicator();
   // Синхронизируем фоново — не блокируем UI
@@ -245,6 +245,7 @@ async function renderHome() {
     <span class="logo">PSBase</span>
     <div class="top-actions">
       <div class="sync-dot ok" id="sync-dot" title="Синхронизировано" onclick="manualSync()"></div>
+      <button class="btn-icon" onclick="nav('casting')" title="Кастинг">🎬</button>
       <button class="btn-icon" onclick="nav('tags')" title="Теги">🏷️</button>
       <button class="btn-icon" onclick="nav('bans')" title="Бан-лист">🚫</button>
     </div>`);
@@ -644,6 +645,10 @@ async function renderAddEdit(id) {
     </div>`;
   }
 
+  // Предзаполнение из кастинга
+  const prefill = State._castingPrefill || null;
+  if (prefill && !id) { State._castingPrefill = null; } // сбрасываем после использования
+
   v.innerHTML=`
     <div class="form-section">
       <div class="form-section-title">📸 Главное фото</div>
@@ -661,7 +666,7 @@ async function renderAddEdit(id) {
     </div>
     <div class="form-section">
       <div class="form-section-title">✦ Основная информация</div>
-      <div class="form-group"><label class="form-label">Имя *</label><input class="form-input" id="f-name" value="${escHtml(m?.name||'')}" placeholder="Имя или псевдоним"></div>
+      <div class="form-group"><label class="form-label">Имя *</label><input class="form-input" id="f-name" value="${escHtml(m?.name||prefill?.name||'')}" placeholder="Имя или псевдоним"></div>
       <div class="form-group"><label class="form-label">Псевдонимы (через запятую)</label><input class="form-input" id="f-aliases" value="${escHtml(m?.aliases||'')}" placeholder="Псевдоним 1, Псевдоним 2"></div>
       <div class="form-group"><label class="form-label">Страна</label>
         <select class="form-input" id="f-country">
@@ -865,8 +870,24 @@ async function saveModel(id) {
       ...ratings
     };
 
-    if(id){ await Models.update(id,data); toast('Сохранено ✓','success'); State.detailId=id; nav('detail'); }
-    else{ const nid=await Models.add(data); toast('Модель добавлена ✦','success'); State.detailId=nid; nav('detail'); }
+    if(id){
+      await Models.update(id,data);
+      toast('Сохранено ✓','success');
+      State.detailId=id;
+      nav('detail');
+    } else {
+      const nid = await Models.add(data);
+      toast('Модель добавлена ✦','success');
+      // Если добавляли из кастинга — помечаем и возвращаемся туда
+      if (prefill?.idx != null) {
+        Casting.queue[prefill.idx].status = 'added';
+        State.detailId = nid;
+        nav('detail'); // сначала показываем детали
+      } else {
+        State.detailId = nid;
+        nav('detail');
+      }
+    }
   } catch(e) {
     if(e.message?.startsWith('DUPLICATE')) toast('Дублирующееся имя — проверьте псевдонимы','error');
     else toast('Ошибка: '+e.message,'error');
@@ -1093,34 +1114,172 @@ function clearAll() {
 }
 
 // ── CASTING ────────────────────────────────────────────────────────
-async function renderCasting(modelId) {
-  const id = modelId || State.detailId;
-  const m  = id ? await Models.getById(id) : null;
+
+// Состояние кастинга
+const Casting = {
+  queue:       [],   // [{name, status: 'pending'|'added'|'banned'}]
+  currentIdx:  null, // индекс выбранного имени
+};
+
+// ── Добавить пачку имён в кастинг (кнопка на главной) ────────────
+function openAddBatchModal() {
+  modal(`
+    <div class="modal-title">🎬 Добавить пачку в кастинг</div>
+    <p style="color:var(--text2);font-size:13px;margin-bottom:12px">
+      Вставь список имён через запятую или с новой строки
+    </p>
+    <textarea class="form-input" id="batch-names" style="height:140px;padding:12px"
+      placeholder="Anna Doe, Jane Smith&#10;Kate Brown"></textarea>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" data-cancel>Отмена</button>
+      <button class="btn btn-gold" data-ok>Добавить в кастинг</button>
+    </div>`,
+    (ov) => {
+      const raw = ov.querySelector('#batch-names').value;
+      // Разбиваем по запятой и новой строке, чистим пустые
+      const names = raw
+        .split(/[,\n]/)
+        .map(n => n.trim())
+        .filter(Boolean);
+      if (!names.length) { toast('Введите хотя бы одно имя', 'error'); return; }
+
+      // Добавляем в очередь (не дублируем уже существующие)
+      const existing = new Set(Casting.queue.map(c => c.name.toLowerCase()));
+      let added = 0;
+      names.forEach(name => {
+        if (!existing.has(name.toLowerCase())) {
+          Casting.queue.push({ name, status: 'pending' });
+          added++;
+        }
+      });
+      toast(`Добавлено ${added} имён в кастинг`, 'success');
+      nav('casting');
+    }
+  );
+}
+
+// ── Главный экран кастинга ────────────────────────────────────────
+function renderCasting() {
+  // Получаем или создаём view
+  let v = document.getElementById('view-casting');
+  if (!v) {
+    v = document.createElement('main');
+    v.className = 'view'; v.id = 'view-casting';
+    document.getElementById('app').insertBefore(v, document.querySelector('.bottom-nav'));
+  }
+  document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  v.classList.add('active');
+  State.view = 'casting';
 
   topBar(`
-    <button class="btn-icon" onclick="history.back()" style="font-size:18px">←</button>
-    <span class="top-title">Кастинг${m ? ': '+escHtml(m.name) : ''}</span>`);
+    <button class="btn-icon" onclick="nav('home')" style="font-size:18px">←</button>
+    <span class="top-title">Кастинг</span>
+    <div class="top-actions">
+      <button class="btn btn-gold" style="height:36px;padding:0 12px;font-size:13px"
+        onclick="openAddBatchModal()">+ Пачка</button>
+    </div>`);
 
-  const v = document.getElementById('view-casting') || (() => {
-    const el = document.createElement('main');
-    el.className = 'view'; el.id = 'view-casting';
-    document.getElementById('app').insertBefore(el, document.querySelector('.bottom-nav'));
-    return el;
-  })();
-  document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
-  v.classList.add('active');
+  const pending = Casting.queue.filter(c => c.status === 'pending');
+  const done    = Casting.queue.filter(c => c.status !== 'pending');
 
-  const initQuery = m ? m.name : '';
+  if (!Casting.queue.length) {
+    v.innerHTML = `
+      <div class="empty-state">
+        <div class="es-icon">🎬</div>
+        <div class="es-title">Кастинг пуст</div>
+        <div class="es-text">Нажмите «+ Пачка» чтобы добавить список имён для проверки</div>
+      </div>
+      <div style="padding:0 0 12px">
+        <button class="btn btn-gold" style="width:100%;height:48px" onclick="openAddBatchModal()">
+          + Добавить пачку имён
+        </button>
+      </div>`;
+    return;
+  }
 
   v.innerHTML = `
-    <div class="casting-search-row">
+    <div class="cast-queue-stats">
+      <span class="cqs-item pending">⏳ ${pending.length} ожидают</span>
+      <span class="cqs-item done">✓ ${done.length} обработано</span>
+    </div>
+
+    ${pending.length ? `
+    <div class="sec-title">Ожидают проверки</div>
+    <div class="cast-name-list" id="cast-pending">
+      ${pending.map((c, i) => {
+        const realIdx = Casting.queue.indexOf(c);
+        return `<div class="cast-name-item" onclick="openCastingItem(${realIdx})">
+          <span class="cni-name">${escHtml(c.name)}</span>
+          <span class="cni-arrow">→</span>
+        </div>`;
+      }).join('')}
+    </div>` : ''}
+
+    ${done.length ? `
+    <div class="sec-title" style="margin-top:18px">Обработано</div>
+    <div class="cast-name-list">
+      ${done.map((c) => {
+        const realIdx = Casting.queue.indexOf(c);
+        const icon = c.status === 'added' ? '✓' : '🚫';
+        const cls  = c.status === 'added' ? 'added' : 'banned';
+        return `<div class="cast-name-item ${cls}" onclick="openCastingItem(${realIdx})">
+          <span class="cni-icon">${icon}</span>
+          <span class="cni-name">${escHtml(c.name)}</span>
+          <span class="cni-status">${c.status === 'added' ? 'Добавлена' : 'В бан'}</span>
+        </div>`;
+      }).join('')}
+    </div>
+
+    <button class="btn btn-ghost" style="width:100%;margin-top:12px;height:40px;font-size:12px"
+      onclick="clearDoneCasting()">Очистить обработанных</button>
+    ` : ''}`;
+}
+
+// ── Открыть конкретное имя из кастинга ───────────────────────────
+async function openCastingItem(idx) {
+  Casting.currentIdx = idx;
+  const item = Casting.queue[idx];
+  if (!item) return;
+
+  let v = document.getElementById('view-casting');
+  document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
+  v.classList.add('active');
+
+  topBar(`
+    <button class="btn-icon" onclick="renderCasting()" style="font-size:18px">←</button>
+    <span class="top-title" style="font-size:14px">${escHtml(item.name)}</span>`);
+
+  v.innerHTML = `
+    <div class="cast-item-header">
+      <div class="cast-item-name">${escHtml(item.name)}</div>
+      <div class="cast-item-actions">
+        <button class="btn btn-primary" style="flex:1;height:44px"
+          onclick="castingAddModel()">✦ Добавить модель</button>
+        <button class="btn btn-danger" style="height:44px;padding:0 14px"
+          onclick="castingBanModel()">🚫 В бан</button>
+      </div>
+    </div>
+
+    <div class="cast-search-row">
       <div class="search-bar" style="flex:1;margin-bottom:0">
         <span class="si">🔍</span>
-        <input id="cast-q" type="text" placeholder="Имя модели..." value="${escHtml(initQuery)}" autofocus>
+        <input id="cast-q" type="text" value="${escHtml(item.name)}" placeholder="Поиск фото...">
         <button class="sc" onclick="document.getElementById('cast-q').value=''">✕</button>
       </div>
-      <button class="btn btn-gold" style="height:44px;padding:0 16px;flex-shrink:0" onclick="castingSearch()">Найти</button>
+      <button class="btn btn-gold" style="height:44px;padding:0 14px;flex-shrink:0"
+        onclick="castingSearch()">Найти</button>
     </div>
+
+    <div id="cast-selected-photo" class="cast-selected-wrap" style="display:none">
+      <div class="sec-title">Выбранное фото</div>
+      <div class="cast-selected-inner">
+        <img id="cast-sel-img" src="" style="width:100px;height:150px;object-fit:cover;border-radius:8px">
+        <button class="btn btn-ghost" style="height:32px;font-size:12px"
+          onclick="clearSelectedPhoto()">✕ Убрать</button>
+      </div>
+    </div>
+
     <div id="cast-results" class="casting-grid"></div>
     <div id="cast-empty"></div>`;
 
@@ -1128,17 +1287,16 @@ async function renderCasting(modelId) {
     if (e.key === 'Enter') castingSearch();
   });
 
-  // Если есть имя — ищем сразу
-  if (initQuery) castingSearch();
+  // Ищем сразу
+  castingSearch();
 }
 
+// ── Поиск фото ────────────────────────────────────────────────────
 async function castingSearch() {
-  const q = document.getElementById('cast-q')?.value.trim();
-  if (!q) return;
-
-  const res  = document.getElementById('cast-results');
-  const emp  = document.getElementById('cast-empty');
-  if (!res) return;
+  const q   = document.getElementById('cast-q')?.value.trim();
+  const res = document.getElementById('cast-results');
+  const emp = document.getElementById('cast-empty');
+  if (!q || !res) return;
 
   res.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
   if (emp) emp.innerHTML = '';
@@ -1148,73 +1306,111 @@ async function castingSearch() {
     res.innerHTML = '';
 
     if (!results.length) {
-      if (emp) emp.innerHTML = `<div class="empty-state">
-        <div class="es-icon">🖼</div>
-        <div class="es-title">Ничего не найдено</div>
-        <div class="es-text">Попробуйте другой запрос</div>
-      </div>`;
+      if (emp) emp.innerHTML = `<div class="empty-state"><div class="es-icon">🖼</div><div class="es-title">Ничего не найдено</div></div>`;
       return;
     }
 
     results.forEach(img => {
       const card = document.createElement('div');
       card.className = 'cast-card';
-      // Экранируем URL для onclick через data-атрибут — безопаснее чем inline
       card.innerHTML = `
-        <img src="${escHtml(img.thumb)}" alt="${escHtml(img.title)}" loading="lazy"
+        <img src="${escHtml(img.thumb)}" alt="" loading="lazy"
              onerror="this.parentElement.style.display='none'">
         <div class="cast-card-actions">
-          <button class="cast-use-btn">Использовать</button>
+          <button class="cast-use-btn">Выбрать фото</button>
         </div>`;
-      card.querySelector('img').onclick         = () => viewImg(img.full);
-      card.querySelector('.cast-use-btn').onclick = () => castingUsePhoto(img.full);
+      card.querySelector('img').onclick          = () => viewImg(img.full);
+      card.querySelector('.cast-use-btn').onclick = () => selectCastingPhoto(img.full, img.thumb);
       res.appendChild(card);
     });
   } catch(e) {
     res.innerHTML = '';
-    // Показываем конкретную ошибку + подсказку
-    const isSetup = e.message.includes('500') || e.message.includes('SERPER') || e.message.includes('secrets');
-    if (emp) emp.innerHTML = `<div class="empty-state">
-      <div class="es-icon">⚠️</div>
-      <div class="es-title">Ошибка поиска</div>
-      <div class="es-text" style="text-align:left;max-width:300px;margin:0 auto">
-        ${escHtml(e.message)}
-        ${isSetup ? `<br><br>
-        <strong style="color:var(--gold)">Как исправить:</strong><br>
-        1. Зарегистрируйся на <a href="https://serper.dev" target="_blank" style="color:var(--accent-light)">serper.dev</a><br>
-        2. Скопируй API key<br>
-        3. В Supabase Dashboard → Edge Functions → Secrets → добавь <code style="background:var(--surface2);padding:1px 5px;border-radius:4px">SERPER_API_KEY</code><br>
-        4. Задеплой функцию заново` : ''}
-      </div>
-    </div>`;
+    if (emp) emp.innerHTML = `<div class="empty-state"><div class="es-icon">⚠️</div><div class="es-title">Ошибка поиска</div><div class="es-text">${escHtml(e.message)}</div></div>`;
   }
 }
 
-async function castingUsePhoto(url) {
-  // Загружаем картинку → сохраняем в Storage → устанавливаем как главное фото
-  const id = State.detailId || State.editingId;
-  if (!id) { toast('Сначала откройте модель', 'info'); return; }
+// ── Выбрать фото для модели ───────────────────────────────────────
+function selectCastingPhoto(fullUrl, thumbUrl) {
+  const wrap = document.getElementById('cast-selected-photo');
+  const img  = document.getElementById('cast-sel-img');
+  if (!wrap || !img) return;
+  img.src = thumbUrl || fullUrl;
+  img.dataset.full = fullUrl;
+  wrap.style.display = 'block';
+  // Скроллим к верху чтобы видеть выбранное фото
+  wrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  toast('Фото выбрано — нажмите «Добавить модель»', 'info', 2000);
+}
 
-  toast('Загружаем фото...', 'info', 2000);
-  try {
-    let finalUrl = url;
-    // Скачиваем через Edge Function чтобы обойти CORS, потом грузим в Storage
-    if (window.ImageKit && State.user && navigator.onLine) {
-      const resp = await fetch(url).catch(() => null);
-      if (resp?.ok) {
-        const blob = await resp.blob();
-        const file = new File([blob], 'casting.jpg', { type: blob.type || 'image/jpeg' });
-        finalUrl = await ImageKit.uploadFile(file, 'models/main');
-      }
+function clearSelectedPhoto() {
+  const wrap = document.getElementById('cast-selected-photo');
+  const img  = document.getElementById('cast-sel-img');
+  if (wrap) wrap.style.display = 'none';
+  if (img)  { img.src = ''; img.dataset.full = ''; }
+}
+
+// ── Добавить модель из кастинга → форма редактирования ───────────
+async function castingAddModel() {
+  const item = Casting.queue[Casting.currentIdx];
+  if (!item) return;
+
+  // Запоминаем выбранное фото
+  const selImg = document.getElementById('cast-sel-img');
+  const photoUrl = selImg?.dataset?.full || '';
+
+  // Переходим на форму добавления с предзаполненным именем
+  State.editingId = null;
+  State._castingPrefill = { name: item.name, photo: photoUrl, idx: Casting.currentIdx };
+  nav('add');
+}
+
+// ── Отправить в бан из кастинга ───────────────────────────────────
+function castingBanModel() {
+  const item = Casting.queue[Casting.currentIdx];
+  if (!item) return;
+
+  modal(`
+    <div class="modal-title">🚫 Отправить в бан-лист</div>
+    <div class="form-group">
+      <label class="form-label">Имя</label>
+      <input class="form-input" id="ban-name" value="${escHtml(item.name)}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Причина</label>
+      <select class="form-select" id="ban-reason">
+        <option>Не подходит</option>
+        <option>Дубликат</option>
+        <option>Низкое качество</option>
+        <option>Другое</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Комментарий</label>
+      <input class="form-input" id="ban-desc" placeholder="Необязательно">
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" data-cancel>Отмена</button>
+      <button class="btn btn-danger" data-ok>В бан</button>
+    </div>`,
+    async (ov) => {
+      const name   = ov.querySelector('#ban-name').value.trim();
+      const reason = ov.querySelector('#ban-reason').value;
+      const desc   = ov.querySelector('#ban-desc').value.trim();
+      await BanRecords.add({ name, reason, description: desc });
+      // Помечаем в очереди
+      Casting.queue[Casting.currentIdx].status = 'banned';
+      toast(`${name} — в бан-листе`, 'info');
+      renderCasting();
     }
-    await Models.update(id, { ...(await Models.getById(id)), main_photo: finalUrl });
-    toast('Фото установлено ✓', 'success');
-    nav('detail', { id });
-  } catch(e) {
-    toast('Ошибка: ' + e.message, 'error');
-  }
+  );
 }
 
+function clearDoneCasting() {
+  Casting.queue = Casting.queue.filter(c => c.status === 'pending');
+  renderCasting();
+}
+
+// ── INIT ────────────────────────────────────────────────────────────
 // ── INIT ────────────────────────────────────────────────────────────
 async function init() {
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(()=>{});
@@ -1232,7 +1428,7 @@ async function init() {
       State.user = user;
       SyncManager._userId = user.id;
       SyncManager.startListeners();
-      await seedDemoData();
+      // await seedDemoData();
       nav('home');
       // Фоновая синхронизация — не блокирует UI
       if (navigator.onLine) {
@@ -1254,7 +1450,7 @@ async function init() {
       if (user && !wasAuthed) {
         // Только что вошли — синхронизируем
         SyncManager.startListeners();
-        await seedDemoData();
+        // await seedDemoData();
         if (navigator.onLine) SyncManager.sync().then(() => updateSyncIndicator());
       }
       updateSyncIndicator();
@@ -1262,7 +1458,7 @@ async function init() {
   } else {
     // Supabase не настроен — работаем локально без авторизации
     document.querySelector('.bottom-nav').style.display='';
-    await seedDemoData();
+    // await seedDemoData();
     nav('home');
   }
 }
