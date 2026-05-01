@@ -209,14 +209,33 @@ const SyncManager = {
     const remoteTbl = TABLE_MAP[op.table] || op.table;
 
     if (op.operation === 'delete') {
-      const localId = parseInt(op.recordId);
-      const local   = await db[op.table]?.get(localId);
-      if (local?.remote_id) {
-        const { error } = await sb.from(remoteTbl).delete().eq('id', local.remote_id);
-        if (error) throw error;
-      }
-      return;
-    }
+  const localId = parseInt(op.recordId);
+  
+  // Пробуем найти remote_id в локальной записи
+  let remoteId = null;
+  const local = await db[op.table]?.get(localId);
+  if (local?.remote_id) {
+    remoteId = local.remote_id;
+  }
+  
+  // Если нет — ищем на сервере по local_id
+  if (!remoteId) {
+    const userId = await this.userId();
+    const { data } = await sb
+      .from(remoteTbl)
+      .select('id')
+      .eq('user_id', userId)
+      .eq('local_id', String(op.recordId))
+      .maybeSingle();
+    remoteId = data?.id ?? null;
+  }
+  
+  if (remoteId) {
+    const { error } = await sb.from(remoteTbl).delete().eq('id', remoteId);
+    if (error) throw error;
+  }
+  return;
+}
 
     // upsert
     let record = op.payload ? (() => { try { return JSON.parse(op.payload); } catch { return null; } })() : null;
