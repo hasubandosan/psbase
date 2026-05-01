@@ -1,4 +1,4 @@
-sync/strategy.js — PSBase SyncManager v2
+// sync/strategy.js — PSBase SyncManager v2
 // Зависит от: db.js, supabase-client.js
 
 const TABLE_MAP = {
