@@ -274,22 +274,35 @@ const SyncManager = {
         if (error) throw error;
         if (!data?.length) continue;
 
-        for (const row of data) {
-          const localObj  = toLocal(localTbl, row);
-          const existing  = await db[localTbl].where('remote_id').equals(row.id).first().catch(() => null);
+        // strategy.js — в методе pull(), внутри цикла for (const row of data)
+for (const row of data) {
+  const localObj = toLocal(localTbl, row);
 
-          if (existing) {
-            // Conflict resolution: compare remote updated_at with local _local_updated
-            const remoteTs = new Date(row.updated_at).getTime();
-            const localTs  = existing._local_updated || existing.date_added || 0;
-            if (remoteTs > localTs) {
-              await db[localTbl].update(existing.id, { ...localObj, id: existing.id });
-            }
-          } else {
-            await db[localTbl].add(localObj);
-          }
-          merged++;
-        }
+  // Ищем сначала по remote_id, потом по local_id (если flush ещё не вернул remote_id)
+  let existing = await db[localTbl].where('remote_id').equals(row.id).first().catch(() => null);
+  
+  if (!existing && row.local_id) {
+    const localNumId = parseInt(row.local_id);
+    if (!isNaN(localNumId)) {
+      existing = await db[localTbl].get(localNumId);
+      // Если нашли по local_id — сразу записываем remote_id чтобы больше не дублировать
+      if (existing) {
+        await db[localTbl].update(existing.id, { remote_id: row.id });
+      }
+    }
+  }
+
+  if (existing) {
+    const remoteTs = new Date(row.updated_at).getTime();
+    const localTs  = existing._local_updated || existing.date_added || 0;
+    if (remoteTs > localTs) {
+      await db[localTbl].update(existing.id, { ...localObj, id: existing.id });
+    }
+  } else {
+    await db[localTbl].add(localObj);
+  }
+  merged++;
+}
 
         // Синхронизация удалений: если запись есть локально но отсутствует на сервере после полного pull
         // — обрабатывается через firstSync флаг (будет добавлено позже)
