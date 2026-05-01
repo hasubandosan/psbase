@@ -1,5 +1,19 @@
-// sync/strategy.js — PSBase SyncManager v2
+// sync/strategy.js — PSBase SyncManager v3
 // Зависит от: db.js, supabase-client.js
+//
+// Новое в v3:
+//   • Soft delete — удаление ставит deleted_at вместо физического удаления
+//   • Restore — сброс deleted_at восстанавливает запись
+//   • GC (garbage collection) — физически удаляет записи старше SOFT_DELETE_TTL_DAYS
+//   • Realtime — Supabase channel подписка для мгновенной синхронизации между устройствами
+//
+// Требования к схеме Supabase (добавить если нет):
+//   ALTER TABLE models      ADD COLUMN IF NOT EXISTS deleted_at timestamptz DEFAULT NULL;
+//   ALTER TABLE tags        ADD COLUMN IF NOT EXISTS deleted_at timestamptz DEFAULT NULL;
+//   ALTER TABLE ban_records ADD COLUMN IF NOT EXISTS deleted_at timestamptz DEFAULT NULL;
+//   CREATE INDEX IF NOT EXISTS idx_models_deleted      ON models(user_id, deleted_at);
+//   CREATE INDEX IF NOT EXISTS idx_tags_deleted        ON tags(user_id, deleted_at);
+//   CREATE INDEX IF NOT EXISTS idx_ban_records_deleted ON ban_records(user_id, deleted_at);
 
 const TABLE_MAP = {
   models:     'models',
@@ -7,9 +21,17 @@ const TABLE_MAP = {
   banRecords: 'ban_records',
 };
 
+// Записи мягко удалённые дольше этого числа дней — удаляются физически при GC
+const SOFT_DELETE_TTL_DAYS = 30;
+
 // ── local → remote ────────────────────────────────────────────────
 function toRemote(table, local, userId) {
-  const base = { user_id: userId, updated_at: new Date(local._local_updated || Date.now()).toISOString() };
+  const base = {
+    user_id:    userId,
+    updated_at: new Date(local._local_updated || Date.now()).toISOString(),
+    // Передаём deleted_at на сервер — null означает "живая запись"
+    deleted_at: local._deleted_at || null,
+  };
 
   if (table === 'models') return {
     ...base,
@@ -67,12 +89,16 @@ function toRemote(table, local, userId) {
 }
 
 // ── remote → local ────────────────────────────────────────────────
-function toLocal(table, remote) {
+// existing — текущая локальная запись (если есть), нужна чтобы не затирать _local_updated
+function toLocal(table, remote, existing = null) {
   const jp = (v, fb) => {
     if (v == null) return fb;
     if (typeof v === 'object') return v;
     try { return JSON.parse(v); } catch { return fb; }
   };
+
+  const remoteTs     = remote.updated_at ? new Date(remote.updated_at).getTime() : Date.now();
+  const localUpdated = existing?._local_updated || remoteTs;
 
   if (table === 'models') return {
     remote_id:        remote.id,
@@ -100,24 +126,29 @@ function toLocal(table, remote) {
     extra_photos:     jp(remote.extra_photos,     []),
     date_added:       remote.created_at ? new Date(remote.created_at).getTime() : Date.now(),
     _remote_updated:  remote.updated_at,
-    _local_updated:   remote.updated_at ? new Date(remote.updated_at).getTime() : Date.now(),
+    _local_updated:   localUpdated,
+    _deleted_at:      remote.deleted_at || null,
   };
 
   if (table === 'tags') return {
-    remote_id:      remote.id,
-    icon:           remote.icon   || '🏷️',
-    name:           remote.name,
-    weight:         remote.weight || 1.0,
-    _local_updated: remote.updated_at ? new Date(remote.updated_at).getTime() : Date.now(),
+    remote_id:       remote.id,
+    icon:            remote.icon   || '🏷️',
+    name:            remote.name,
+    weight:          remote.weight || 1.0,
+    _remote_updated: remote.updated_at,
+    _local_updated:  localUpdated,
+    _deleted_at:     remote.deleted_at || null,
   };
 
   if (table === 'banRecords') return {
-    remote_id:      remote.id,
-    name:           remote.name,
-    reason:         remote.reason      || '',
-    description:    remote.description || '',
-    date_added:     remote.created_at ? new Date(remote.created_at).getTime() : Date.now(),
-    _local_updated: remote.updated_at ? new Date(remote.updated_at).getTime() : Date.now(),
+    remote_id:       remote.id,
+    name:            remote.name,
+    reason:          remote.reason      || '',
+    description:     remote.description || '',
+    date_added:      remote.created_at ? new Date(remote.created_at).getTime() : Date.now(),
+    _remote_updated: remote.updated_at,
+    _local_updated:  localUpdated,
+    _deleted_at:     remote.deleted_at || null,
   };
 
   return remote;
@@ -126,8 +157,10 @@ function toLocal(table, remote) {
 // ── SyncManager ───────────────────────────────────────────────────
 const SyncManager = {
   _flushing:         false,
+  _syncing:          false,
   _userId:           null,
   _listenersStarted: false,
+  _realtimeChannel:  null,
 
   async userId() {
     if (this._userId) return this._userId;
@@ -136,12 +169,87 @@ const SyncManager = {
     return this._userId;
   },
 
-  // Добавить операцию в очередь — с дедупликацией
+  // ── Soft delete ────────────────────────────────────────────────
+  // Помечает запись как удалённую — физически не удаляет.
+  // UI должен фильтровать: db.models.filter(r => !r._deleted_at).toArray()
+  async softDelete(table, recordId) {
+    const rid       = parseInt(recordId);
+    const deletedAt = new Date().toISOString();
+
+    await db[table]?.update(rid, {
+      _deleted_at:    deletedAt,
+      _local_updated: Date.now(),
+    });
+
+    // Soft delete идёт как upsert — просто обновляем поле deleted_at
+    await this.enqueue(table, 'upsert', recordId);
+  },
+
+  // ── Restore ───────────────────────────────────────────────────
+  // Сбрасывает deleted_at — запись снова живая и появится в UI
+  async restore(table, recordId) {
+    const rid = parseInt(recordId);
+
+    await db[table]?.update(rid, {
+      _deleted_at:    null,
+      _local_updated: Date.now(),
+    });
+
+    await this.enqueue(table, 'upsert', recordId);
+  },
+
+  // ── Garbage Collection ─────────────────────────────────────────
+  // Физически удаляет soft-deleted записи старше SOFT_DELETE_TTL_DAYS дней.
+  // Вызывать при старте приложения или раз в сутки.
+  // На сервере можно дополнительно настроить Supabase scheduled function.
+  async gc() {
+    const userId = await this.userId();
+    if (!userId) return 0;
+
+    const cutoffIso = new Date(Date.now() - SOFT_DELETE_TTL_DAYS * 86_400_000).toISOString();
+    const cutoffMs  = new Date(cutoffIso).getTime();
+    const sb        = getSupabase();
+    let   purged    = 0;
+
+    for (const [localTbl, remoteTbl] of Object.entries(TABLE_MAP)) {
+      try {
+        // Удаляем физически на сервере записи старше TTL
+        const { error } = await sb
+          .from(remoteTbl)
+          .delete()
+          .eq('user_id', userId)
+          .not('deleted_at', 'is', null)
+          .lt('deleted_at', cutoffIso);
+
+        if (error) {
+          console.warn(`[GC] Remote failed [${localTbl}]:`, error.message);
+          continue;
+        }
+
+        // Удаляем физически локально
+        const stale = await db[localTbl]
+          .filter(r => r._deleted_at != null && new Date(r._deleted_at).getTime() < cutoffMs)
+          .toArray()
+          .catch(() => []);
+
+        for (const r of stale) {
+          await db[localTbl].delete(r.id).catch(() => {});
+          purged++;
+        }
+      } catch (e) {
+        console.warn(`[GC] Failed [${localTbl}]:`, e.message);
+      }
+    }
+
+    console.log(`[GC] Purged ${purged} records older than ${SOFT_DELETE_TTL_DAYS} days`);
+    return purged;
+  },
+
+  // ── Enqueue ────────────────────────────────────────────────────
   async enqueue(table, operation, recordId, payload = null) {
     const rid = String(recordId);
 
     if (operation === 'upsert') {
-      // Ищем существующую запись в очереди для этой же строки
       const existing = await db.syncQueue
         .where('[table+operation+recordId]')
         .equals([table, 'upsert', rid])
@@ -149,14 +257,12 @@ const SyncManager = {
         .catch(() => null);
 
       if (existing) {
-        // Удаляем старую и добавляем новую — чтобы честно переместить в конец очереди
         await db.syncQueue.delete(existing.id).catch(() => {});
-        // payload обновляем на новый если передан, иначе оставляем старый
         await db.syncQueue.add({
           table,
           operation,
-          recordId: rid,
-          payload:  payload ? JSON.stringify(payload) : existing.payload,
+          recordId:  rid,
+          payload:   payload ? JSON.stringify(payload) : existing.payload,
           createdAt: Date.now(),
           retries:   0,
         });
@@ -165,12 +271,18 @@ const SyncManager = {
     }
 
     if (operation === 'delete') {
-      // При удалении — убираем все pending upsert для этой записи
       await db.syncQueue
         .where('[table+operation+recordId]')
         .equals([table, 'upsert', rid])
         .delete()
         .catch(() => {});
+
+      if (!payload) {
+        const localRecord = await db[table]?.get(parseInt(rid)).catch(() => null);
+        if (localRecord?.remote_id) {
+          payload = { remote_id: localRecord.remote_id };
+        }
+      }
     }
 
     await db.syncQueue.add({
@@ -197,7 +309,7 @@ const SyncManager = {
       for (const op of queue) {
         try {
           await this._exec(sb, userId, op);
-          await db.syncQueue.delete(op.id);
+          await db.syncQueue.delete(op.id).catch(() => {});
         } catch (e) {
           console.warn(`SyncOp failed [${op.table}/${op.operation}]:`, e.message);
           if ((op.retries || 0) >= 5) {
@@ -216,16 +328,15 @@ const SyncManager = {
     const remoteTbl = TABLE_MAP[op.table] || op.table;
 
     if (op.operation === 'delete') {
-      const localId = parseInt(op.recordId);
-
-      // FIX: убрали повторное объявление userId — используем параметр функции
+      // Hard delete — используется только напрямую (GC), UI работает через softDelete
       let remoteId = null;
-      const local = await db[op.table]?.get(localId);
-      if (local?.remote_id) {
-        remoteId = local.remote_id;
+      if (op.payload) {
+        try { remoteId = JSON.parse(op.payload)?.remote_id ?? null; } catch {}
       }
-
-      // Если нет — ищем на сервере по local_id
+      if (!remoteId) {
+        const local = await db[op.table]?.get(parseInt(op.recordId));
+        if (local?.remote_id) remoteId = local.remote_id;
+      }
       if (!remoteId) {
         const { data } = await sb
           .from(remoteTbl)
@@ -235,7 +346,6 @@ const SyncManager = {
           .maybeSingle();
         remoteId = data?.id ?? null;
       }
-
       if (remoteId) {
         const { error } = await sb.from(remoteTbl).delete().eq('id', remoteId);
         if (error) throw error;
@@ -243,17 +353,15 @@ const SyncManager = {
       return;
     }
 
-    // upsert
+    // upsert — включает soft delete (deleted_at передаётся через toRemote)
     let record = null;
     if (op.payload) {
       try { record = JSON.parse(op.payload); } catch { record = null; }
     }
-    // FIX: если payload не смогли распарсить или его нет — тянем из БД
-    // но если записи нет в БД (удалена) — бросаем ошибку вместо молчаливого пропуска
     if (!record) {
       record = await db[op.table]?.get(parseInt(op.recordId));
       if (!record) {
-        console.warn(`SyncManager._exec: record ${op.table}#${op.recordId} not found, skipping upsert`);
+        console.warn(`SyncManager._exec: record ${op.table}#${op.recordId} not found, skipping`);
         return;
       }
     }
@@ -268,8 +376,6 @@ const SyncManager = {
     }
 
     const row = toRemote(op.table, record, userId);
-
-    // Убираем id из объекта чтобы Postgres сам разрешал конфликт по local_id+user_id
     const { id: _rid, ...rowWithoutId } = row;
 
     const { data, error } = await sb
@@ -296,6 +402,8 @@ const SyncManager = {
 
     for (const [localTbl, remoteTbl] of Object.entries(TABLE_MAP)) {
       try {
+        // Тянем все записи включая soft-deleted — удаление с другого устройства
+        // должно синхронизироваться сюда через deleted_at
         const { data, error } = await sb
           .from(remoteTbl)
           .select('*')
@@ -306,9 +414,6 @@ const SyncManager = {
         if (!data?.length) continue;
 
         for (const row of data) {
-          const localObj = toLocal(localTbl, row);
-
-          // Ищем по remote_id, потом по local_id
           let existing = await db[localTbl].where('remote_id').equals(row.id).first().catch(() => null);
 
           if (!existing && row.local_id) {
@@ -321,17 +426,29 @@ const SyncManager = {
             }
           }
 
+          const localObj = toLocal(localTbl, row, existing);
+
           if (existing) {
             const remoteTs = new Date(row.updated_at).getTime();
             const localTs  = existing._local_updated || existing.date_added || 0;
+
             if (remoteTs > localTs) {
-              await db[localTbl].update(existing.id, { ...localObj, id: existing.id });
-              merged++; // FIX: считаем только реально обновлённые записи
+              const pendingOp = await db.syncQueue
+                .where('[table+operation+recordId]')
+                .equals([localTbl, 'upsert', String(existing.id)])
+                .first()
+                .catch(() => null);
+
+              if (!pendingOp) {
+                await db[localTbl].update(existing.id, { ...localObj, id: existing.id });
+                merged++;
+              }
             }
-            // если remote не новее — ничего не делаем и не считаем
           } else {
+            // Новая запись — добавляем даже если soft-deleted
+            // (UI не покажет — фильтрует по _deleted_at)
             await db[localTbl].add(localObj);
-            merged++; // новая запись — считаем
+            merged++;
           }
         }
 
@@ -354,9 +471,102 @@ const SyncManager = {
     return merged;
   },
 
+  // ── Realtime ──────────────────────────────────────────────────
+  // Supabase Realtime — мгновенная синхронизация между устройствами без polling.
+  // Дополняет pull/flush для online-режима. При оффлайне — отключается автоматически.
+  async startRealtime() {
+    const userId = await this.userId();
+    if (!userId || this._realtimeChannel) return;
+
+    const sb = getSupabase();
+
+    this._realtimeChannel = sb
+      .channel(`psbase_sync_${userId}`)
+      .on('postgres_changes', {
+        event:  '*',
+        schema: 'public',
+        filter: `user_id=eq.${userId}`,
+      }, (payload) => this._handleRealtimeEvent(payload))
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          console.log('[Realtime] Connected');
+        } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
+          console.warn('[Realtime] Disconnected');
+          this._realtimeChannel = null;
+        }
+      });
+  },
+
+  stopRealtime() {
+    if (!this._realtimeChannel) return;
+    getSupabase().removeChannel(this._realtimeChannel);
+    this._realtimeChannel = null;
+    console.log('[Realtime] Stopped');
+  },
+
+  async _handleRealtimeEvent(payload) {
+    const { eventType, table: remoteTbl, new: newRow, old: oldRow } = payload;
+
+    const localTbl = Object.keys(TABLE_MAP).find(k => TABLE_MAP[k] === remoteTbl);
+    if (!localTbl) return;
+
+    try {
+      if (eventType === 'DELETE') {
+        // Hard delete с другого устройства
+        if (oldRow?.id) {
+          const existing = await db[localTbl].where('remote_id').equals(oldRow.id).first().catch(() => null);
+          if (existing) {
+            await db[localTbl].delete(existing.id);
+            this._notifyUIChange(localTbl, 'delete', existing.id);
+          }
+        }
+        return;
+      }
+
+      if (!newRow) return;
+
+      const existing = await db[localTbl].where('remote_id').equals(newRow.id).first().catch(() => null);
+      const localObj = toLocal(localTbl, newRow, existing);
+
+      if (existing) {
+        const remoteTs = new Date(newRow.updated_at).getTime();
+        const localTs  = existing._local_updated || 0;
+        if (remoteTs <= localTs) return; // наши данные новее
+
+        const pendingOp = await db.syncQueue
+          .where('[table+operation+recordId]')
+          .equals([localTbl, 'upsert', String(existing.id)])
+          .first()
+          .catch(() => null);
+
+        if (!pendingOp) {
+          await db[localTbl].update(existing.id, { ...localObj, id: existing.id });
+          this._notifyUIChange(localTbl, 'update', existing.id);
+        }
+      } else {
+        const newId = await db[localTbl].add(localObj);
+        this._notifyUIChange(localTbl, 'insert', newId);
+      }
+    } catch (e) {
+      console.warn('[Realtime] Failed to apply event:', e.message);
+    }
+  },
+
+  // Диспатчит кастомное событие — UI слушает через window.addEventListener('sync:change', ...)
+  _notifyUIChange(table, eventType, recordId) {
+    window.dispatchEvent(new CustomEvent('sync:change', {
+      detail: { table, eventType, recordId }
+    }));
+    if (table === 'models' && typeof reloadGrid === 'function') {
+      if (State?.view === 'home') reloadGrid();
+    }
+  },
+
   // ── Full sync ─────────────────────────────────────────────────
   async sync() {
+    if (this._syncing) return { skipped: true };
     if (!navigator.onLine) return { offline: true };
+    this._syncing = true;
     try {
       const pulled = await this.pull();
       await this.flush();
@@ -364,6 +574,8 @@ const SyncManager = {
     } catch (e) {
       console.error('Sync error:', e);
       return { error: e.message };
+    } finally {
+      this._syncing = false;
     }
   },
 
@@ -376,7 +588,13 @@ const SyncManager = {
   async getStatus() {
     const pending = await db.syncQueue.count();
     const meta    = await db.syncMeta.get('lastPullAt').catch(() => null);
-    return { pending, lastSync: meta?.value || null, isOnline: navigator.onLine, isAuthed: !!(await this.userId()) };
+    return {
+      pending,
+      lastSync:   meta?.value || null,
+      isOnline:   navigator.onLine,
+      isAuthed:   !!(await this.userId()),
+      isRealtime: !!this._realtimeChannel,
+    };
   },
 
   // ── Auto-listeners ────────────────────────────────────────────
@@ -388,15 +606,16 @@ const SyncManager = {
       toast('Соединение восстановлено, синхронизируем...', 'info', 2000);
       const result = await this.sync();
       if (result.pulled > 0) {
-        // FIX: исправлен template literal
         toast(`Получено ${result.pulled} обновлений`, 'success', 2500);
-        if (State.view === 'home') reloadGrid();
+        if (State?.view === 'home') reloadGrid();
       }
+      await this.startRealtime();
       updateSyncIndicator();
     });
 
     window.addEventListener('offline', () => {
       toast('Нет соединения — работаем офлайн', 'info', 2000);
+      this.stopRealtime();
       updateSyncIndicator();
     });
   },
