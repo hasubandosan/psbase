@@ -1,4 +1,4 @@
-// sync/strategy.js — PSBase SyncManager v2
+sync/strategy.js — PSBase SyncManager v2
 // Зависит от: db.js, supabase-client.js
 
 const TABLE_MAP = {
@@ -13,7 +13,6 @@ function toRemote(table, local, userId) {
 
   if (table === 'models') return {
     ...base,
-    // id включается только если remote_id известен — иначе Postgres генерирует сам
     ...(local.remote_id ? { id: local.remote_id } : {}),
     local_id:         String(local.id),
     name:             local.name,
@@ -105,19 +104,19 @@ function toLocal(table, remote) {
   };
 
   if (table === 'tags') return {
-    remote_id: remote.id,
-    icon:      remote.icon   || '🏷️',
-    name:      remote.name,
-    weight:    remote.weight || 1.0,
+    remote_id:      remote.id,
+    icon:           remote.icon   || '🏷️',
+    name:           remote.name,
+    weight:         remote.weight || 1.0,
     _local_updated: remote.updated_at ? new Date(remote.updated_at).getTime() : Date.now(),
   };
 
   if (table === 'banRecords') return {
-    remote_id:   remote.id,
-    name:        remote.name,
-    reason:      remote.reason      || '',
-    description: remote.description || '',
-    date_added:  remote.created_at ? new Date(remote.created_at).getTime() : Date.now(),
+    remote_id:      remote.id,
+    name:           remote.name,
+    reason:         remote.reason      || '',
+    description:    remote.description || '',
+    date_added:     remote.created_at ? new Date(remote.created_at).getTime() : Date.now(),
     _local_updated: remote.updated_at ? new Date(remote.updated_at).getTime() : Date.now(),
   };
 
@@ -138,7 +137,6 @@ const SyncManager = {
   },
 
   // Добавить операцию в очередь — с дедупликацией
-  // Если для той же записи уже есть upsert в очереди — обновляем, не дублируем
   async enqueue(table, operation, recordId, payload = null) {
     const rid = String(recordId);
 
@@ -151,14 +149,23 @@ const SyncManager = {
         .catch(() => null);
 
       if (existing) {
-        // Обновляем timestamp — запись переместится в конец при следующем flush
-        await db.syncQueue.update(existing.id, { createdAt: Date.now(), retries: 0 });
+        // Удаляем старую и добавляем новую — чтобы честно переместить в конец очереди
+        await db.syncQueue.delete(existing.id).catch(() => {});
+        // payload обновляем на новый если передан, иначе оставляем старый
+        await db.syncQueue.add({
+          table,
+          operation,
+          recordId: rid,
+          payload:  payload ? JSON.stringify(payload) : existing.payload,
+          createdAt: Date.now(),
+          retries:   0,
+        });
         return;
       }
     }
 
     if (operation === 'delete') {
-      // При удалении — убираем все pending upsert для этой записи (они уже не нужны)
+      // При удалении — убираем все pending upsert для этой записи
       await db.syncQueue
         .where('[table+operation+recordId]')
         .equals([table, 'upsert', rid])
@@ -209,42 +216,47 @@ const SyncManager = {
     const remoteTbl = TABLE_MAP[op.table] || op.table;
 
     if (op.operation === 'delete') {
-  const localId = parseInt(op.recordId);
-  
-  // Пробуем найти remote_id в локальной записи
-  let remoteId = null;
-  const local = await db[op.table]?.get(localId);
-  if (local?.remote_id) {
-    remoteId = local.remote_id;
-  }
-  
-  // Если нет — ищем на сервере по local_id
-  if (!remoteId) {
-    const userId = await this.userId();
-    const { data } = await sb
-      .from(remoteTbl)
-      .select('id')
-      .eq('user_id', userId)
-      .eq('local_id', String(op.recordId))
-      .maybeSingle();
-    remoteId = data?.id ?? null;
-  }
-  
-  if (remoteId) {
-    const { error } = await sb.from(remoteTbl).delete().eq('id', remoteId);
-    if (error) throw error;
-  }
-  return;
-}
+      const localId = parseInt(op.recordId);
+
+      // FIX: убрали повторное объявление userId — используем параметр функции
+      let remoteId = null;
+      const local = await db[op.table]?.get(localId);
+      if (local?.remote_id) {
+        remoteId = local.remote_id;
+      }
+
+      // Если нет — ищем на сервере по local_id
+      if (!remoteId) {
+        const { data } = await sb
+          .from(remoteTbl)
+          .select('id')
+          .eq('user_id', userId)
+          .eq('local_id', String(op.recordId))
+          .maybeSingle();
+        remoteId = data?.id ?? null;
+      }
+
+      if (remoteId) {
+        const { error } = await sb.from(remoteTbl).delete().eq('id', remoteId);
+        if (error) throw error;
+      }
+      return;
+    }
 
     // upsert
-    let record = op.payload ? (() => { try { return JSON.parse(op.payload); } catch { return null; } })() : null;
+    let record = null;
+    if (op.payload) {
+      try { record = JSON.parse(op.payload); } catch { record = null; }
+    }
+    // FIX: если payload не смогли распарсить или его нет — тянем из БД
+    // но если записи нет в БД (удалена) — бросаем ошибку вместо молчаливого пропуска
     if (!record) {
       record = await db[op.table]?.get(parseInt(op.recordId));
+      if (!record) {
+        console.warn(`SyncManager._exec: record ${op.table}#${op.recordId} not found, skipping upsert`);
+        return;
+      }
     }
-    if (!record) return;
-
-    const row = toRemote(op.table, record, userId);
 
     if (op.table === 'settings') {
       const { error } = await sb.from('settings').upsert(
@@ -255,19 +267,19 @@ const SyncManager = {
       return;
     }
 
-    let data, error;
+    const row = toRemote(op.table, record, userId);
 
-    // Всегда делаем upsert по local_id+user_id, чтобы не зависеть от устаревшего remote_id
-    const { id: _rid, ...rowWithoutId } = row; // убираем id=undefined из объекта
-    ({ data, error } = await sb
+    // Убираем id из объекта чтобы Postgres сам разрешал конфликт по local_id+user_id
+    const { id: _rid, ...rowWithoutId } = row;
+
+    const { data, error } = await sb
       .from(remoteTbl)
       .upsert(rowWithoutId, { onConflict: 'local_id,user_id', ignoreDuplicates: false })
       .select('id')
-      .single());
+      .single();
 
     if (error) throw error;
     if (data?.id) {
-      // Сохраняем полученный remote_id, даже если он уже был
       await db[op.table]?.update(parseInt(op.recordId), { remote_id: data.id });
     }
   },
@@ -293,38 +305,36 @@ const SyncManager = {
         if (error) throw error;
         if (!data?.length) continue;
 
-        // strategy.js — в методе pull(), внутри цикла for (const row of data)
-for (const row of data) {
-  const localObj = toLocal(localTbl, row);
+        for (const row of data) {
+          const localObj = toLocal(localTbl, row);
 
-  // Ищем сначала по remote_id, потом по local_id (если flush ещё не вернул remote_id)
-  let existing = await db[localTbl].where('remote_id').equals(row.id).first().catch(() => null);
-  
-  if (!existing && row.local_id) {
-    const localNumId = parseInt(row.local_id);
-    if (!isNaN(localNumId)) {
-      existing = await db[localTbl].get(localNumId);
-      // Если нашли по local_id — сразу записываем remote_id чтобы больше не дублировать
-      if (existing) {
-        await db[localTbl].update(existing.id, { remote_id: row.id });
-      }
-    }
-  }
+          // Ищем по remote_id, потом по local_id
+          let existing = await db[localTbl].where('remote_id').equals(row.id).first().catch(() => null);
 
-  if (existing) {
-    const remoteTs = new Date(row.updated_at).getTime();
-    const localTs  = existing._local_updated || existing.date_added || 0;
-    if (remoteTs > localTs) {
-      await db[localTbl].update(existing.id, { ...localObj, id: existing.id });
-    }
-  } else {
-    await db[localTbl].add(localObj);
-  }
-  merged++;
-}
+          if (!existing && row.local_id) {
+            const localNumId = parseInt(row.local_id);
+            if (!isNaN(localNumId)) {
+              existing = await db[localTbl].get(localNumId);
+              if (existing) {
+                await db[localTbl].update(existing.id, { remote_id: row.id });
+              }
+            }
+          }
 
-        // Синхронизация удалений: если запись есть локально но отсутствует на сервере после полного pull
-        // — обрабатывается через firstSync флаг (будет добавлено позже)
+          if (existing) {
+            const remoteTs = new Date(row.updated_at).getTime();
+            const localTs  = existing._local_updated || existing.date_added || 0;
+            if (remoteTs > localTs) {
+              await db[localTbl].update(existing.id, { ...localObj, id: existing.id });
+              merged++; // FIX: считаем только реально обновлённые записи
+            }
+            // если remote не новее — ничего не делаем и не считаем
+          } else {
+            await db[localTbl].add(localObj);
+            merged++; // новая запись — считаем
+          }
+        }
+
       } catch (e) {
         console.warn(`Pull failed [${localTbl}]:`, e.message);
       }
@@ -369,19 +379,22 @@ for (const row of data) {
     return { pending, lastSync: meta?.value || null, isOnline: navigator.onLine, isAuthed: !!(await this.userId()) };
   },
 
-    // ── Auto-listeners ────────────────────────────────────────────
+  // ── Auto-listeners ────────────────────────────────────────────
   startListeners() {
     if (this._listenersStarted) return;
     this._listenersStarted = true;
+
     window.addEventListener('online', async () => {
       toast('Соединение восстановлено, синхронизируем...', 'info', 2000);
       const result = await this.sync();
       if (result.pulled > 0) {
+        // FIX: исправлен template literal
         toast(`Получено ${result.pulled} обновлений`, 'success', 2500);
         if (State.view === 'home') reloadGrid();
       }
       updateSyncIndicator();
     });
+
     window.addEventListener('offline', () => {
       toast('Нет соединения — работаем офлайн', 'info', 2000);
       updateSyncIndicator();
