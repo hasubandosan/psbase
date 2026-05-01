@@ -80,15 +80,13 @@ const ImageKit = {
   // ── URL-трансформации через Supabase Image Transform ─────────
   // Supabase Storage поддерживает трансформации через /render/image
   _tr(url, params) {
-    if (!url || url.startsWith('data:')) return url;
-    // Supabase transform: /storage/v1/render/image/public/...?width=300&quality=70
-    let base = url.replace('/storage/v1/object/public/', '/storage/v1/render/image/public/');
-    // Если уже render, уберем старые параметры
-    if (base.includes('/render/image/public/')) {
-      base = base.split('?')[0];
-    }
-    return `${base}?${params}&format=webp`;
-  },
+  if (!url || url.startsWith('data:')) return url;
+  const clean = url.split('?')[0];
+  // render/image работает только если путь через /object/public/
+  if (!clean.includes('/object/public/')) return clean;
+  const renderUrl = clean.replace('/storage/v1/object/public/', '/storage/v1/render/image/public/');
+  return `${renderUrl}?${params}&format=webp`;
+},
   thumb(url)  { return this._tr(url, `width=${CONFIG.image.thumbWidth}&quality=70`); },
   card(url)   { return this._tr(url, `width=${CONFIG.image.cardWidth}&quality=75`); },
   detail(url) { return this._tr(url, 'width=800&quality=80'); },
