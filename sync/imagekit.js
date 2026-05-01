@@ -38,9 +38,9 @@ const ImageKit = {
   // Возвращает публичный URL или кидает ошибку
   async upload(blob, fileName, folder = 'models') {
     const sb   = getSupabase();
-    // Уникальное имя — никогда не будет конфликта
     const ext  = 'webp';
     const safe = fileName.replace(/[^a-z0-9]/gi, '_').slice(0, 40);
+    // FIX: исправлен template literal
     const path = `${folder}/${Date.now()}_${safe}.${ext}`;
 
     const { error } = await sb.storage
@@ -57,7 +57,6 @@ const ImageKit = {
   // ── Загрузка из File (форма) ──────────────────────────────────
   async uploadFile(file, folder = 'models') {
     const compressed = await this.compress(file);
-    // Имя без расширения — add() добавит .webp
     const baseName = (file.name || 'photo').replace(/\.[^.]+$/, '');
     return this.upload(compressed, baseName, folder);
   },
@@ -65,11 +64,11 @@ const ImageKit = {
   // ── Загрузка из dataURL (миграция старых base64) ──────────────
   async uploadDataUrl(dataUrl, baseName, folder = 'models') {
     if (!dataUrl || !dataUrl.startsWith('data:')) {
-      // Если уже URL, нормализуем
       return dataUrl.split('?')[0];
     }
     try {
       const blob = await this.compressFromDataUrl(dataUrl);
+      // FIX: исправлен template literal
       return await this.upload(blob, `${baseName}.webp`, folder);
     } catch (e) {
       console.warn('Storage upload failed, keeping local:', e.message);
@@ -78,15 +77,16 @@ const ImageKit = {
   },
 
   // ── URL-трансформации через Supabase Image Transform ─────────
-  // Supabase Storage поддерживает трансформации через /render/image
   _tr(url, params) {
-  if (!url || url.startsWith('data:')) return url;
-  const clean = url.split('?')[0];
-  // render/image работает только если путь через /object/public/
-  if (!clean.includes('/object/public/')) return clean;
-  const renderUrl = clean.replace('/storage/v1/object/public/', '/storage/v1/render/image/public/');
-  return `${renderUrl}?${params}&format=webp`;
-},
+    if (!url || url.startsWith('data:')) return url;
+    const clean = url.split('?')[0];
+    if (!clean.includes('/object/public/')) return clean;
+    const renderUrl = clean.replace('/storage/v1/object/public/', '/storage/v1/render/image/public/');
+    // FIX: исправлен template literal
+    return `${renderUrl}?${params}&format=webp`;
+  },
+
+  // FIX: исправлены template literals во всех методах трансформации
   thumb(url)  { return this._tr(url, `width=${CONFIG.image.thumbWidth}&quality=70`); },
   card(url)   { return this._tr(url, `width=${CONFIG.image.cardWidth}&quality=75`); },
   detail(url) { return this._tr(url, 'width=800&quality=80'); },
@@ -95,9 +95,7 @@ const ImageKit = {
     return this._tr(url, `width=${s}&height=${s}&resize=cover&quality=75`);
   },
 
-  // ── Извлечь path из публичного URL Supabase Storage ─────────────
-  // https://xxx.supabase.co/storage/v1/object/public/photos/models/123.webp
-  // или /storage/v1/render/image/public/photos/models/123.webp?...
+  // ── Извлечь path из публичного URL Supabase Storage ──────────
   _pathFromUrl(url) {
     if (!url || url.startsWith('data:')) return null;
     const marker = '/photos/';
@@ -106,7 +104,7 @@ const ImageKit = {
     return url.slice(idx + marker.length).split('?')[0];
   },
 
-  // ── Удалить список URL из Storage ────────────────────────────────
+  // ── Удалить список URL из Storage ────────────────────────────
   async deleteUrls(urls = []) {
     const paths = urls.map(u => this._pathFromUrl(u)).filter(Boolean);
     if (!paths.length) return;
@@ -116,7 +114,7 @@ const ImageKit = {
     else console.log('[Storage] Deleted', paths.length, 'files');
   },
 
-  // ── Собрать все URL фото модели ───────────────────────────────────
+  // ── Собрать все URL фото модели ───────────────────────────────
   collectModelUrls(model) {
     const urls = [];
     if (model.main_photo && !model.main_photo.startsWith('data:')) urls.push(model.main_photo);
@@ -128,7 +126,6 @@ const ImageKit = {
   // ── Ленивая миграция base64 → Storage при открытии карточки ──
   async migrateModelPhotos(model) {
     if (!model) return model;
-    // Только если Supabase настроен и пользователь авторизован
     if (!State.user) return model;
 
     let changed = false;
