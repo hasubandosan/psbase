@@ -212,14 +212,6 @@ const SyncManager = {
       const localId = parseInt(op.recordId);
       const local   = await db[op.table]?.get(localId);
       if (local?.remote_id) {
-        // Запишем в deleted_records для синхронизации удаления
-        await sb.from('deleted_records').insert({
-          id: crypto.randomUUID(),
-          user_id: userId,
-          table_name: op.table,
-          record_id: local.remote_id,
-          deleted_at: new Date().toISOString()
-        });
         const { error } = await sb.from(remoteTbl).delete().eq('id', local.remote_id);
         if (error) throw error;
       }
@@ -299,23 +291,8 @@ const SyncManager = {
           merged++;
         }
 
-        // Pull deleted records
-        const { data: deleted } = await sb
-          .from('deleted_records')
-          .select('record_id')
-          .eq('user_id', userId)
-          .eq('table_name', localTbl)
-          .gt('deleted_at', lastPull);
-
-        if (deleted) {
-          for (const d of deleted) {
-            const local = await db[localTbl].where('remote_id').equals(d.record_id).first().catch(() => null);
-            if (local) {
-              await db[localTbl].delete(local.id);
-              merged++;
-            }
-          }
-        }
+        // Синхронизация удалений: если запись есть локально но отсутствует на сервере после полного pull
+        // — обрабатывается через firstSync флаг (будет добавлено позже)
       } catch (e) {
         console.warn(`Pull failed [${localTbl}]:`, e.message);
       }

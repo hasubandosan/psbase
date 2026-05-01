@@ -26,14 +26,15 @@ db.version(6).stores({
   syncMeta:   'key'
 });
 
-// v7: _local_updated для правильного conflict resolution при pull
+// v7: _local_updated + castingQueue
 db.version(7).stores({
-  models:     '++id, name, country, is_favorite, drops, overall, potential, date_added, remote_id, _local_updated',
-  tags:       '++id, name, remote_id, _local_updated',
-  banRecords: '++id, name, reason, date_added, remote_id, _local_updated',
-  settings:   'key',
-  syncQueue:  '++id, [table+operation+recordId], createdAt',
-  syncMeta:   'key'
+  models:       '++id, name, country, is_favorite, drops, overall, potential, date_added, remote_id',
+  tags:         '++id, name, remote_id',
+  banRecords:   '++id, name, reason, date_added, remote_id',
+  settings:     'key',
+  syncQueue:    '++id, [table+operation+recordId], createdAt',
+  syncMeta:     'key',
+  castingQueue: '++id, status, createdAt',
 });
 
 // ── Rating Levels ─────────────────────────────────────────────────
