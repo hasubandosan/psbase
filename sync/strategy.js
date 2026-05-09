@@ -1,19 +1,38 @@
-// sync/strategy.js — PSBase SyncManager v3
+// sync/strategy.js — PSBase SyncManager v5 (переписан с нуля)
 // Зависит от: db.js, supabase-client.js
 //
-// Новое в v3:
-//   • Soft delete — удаление ставит deleted_at вместо физического удаления
-//   • Restore — сброс deleted_at восстанавливает запись
-//   • GC (garbage collection) — физически удаляет записи старше SOFT_DELETE_TTL_DAYS
-//   • Realtime — Supabase channel подписка для мгновенной синхронизации между устройствами
+// Ключевые принципы:
+//   1. Единственный источник истины — Supabase. IndexedDB — только кэш.
+//   2. Удаление = soft delete (deleted_at). Физически никогда не удаляем локально до подтверждения сервера.
+//   3. Все операции идут через очередь. Никаких прямых вызовов Supabase из UI.
+//   4. Pull тянет ВСЁ включая deleted_at — так удаление синхронизируется между устройствами.
+//   5. remote_id всегда записывается после первого успешного upsert.
 //
-// Требования к схеме Supabase (добавить если нет):
+// Изменения в db.js — добавить v8:
+//   db.version(8).stores({
+//     models:     '++id, name, country, is_favorite, drops, overall, potential, date_added, remote_id, _deleted_at',
+//     tags:       '++id, name, remote_id, _deleted_at',
+//     banRecords: '++id, name, reason, date_added, remote_id, _deleted_at',
+//     settings:   'key',
+//     syncQueue:  '++id, [table+operation+recordId], createdAt',
+//     syncMeta:   'key',
+//     castingQueue: '++id, status, createdAt',
+//   });
+//
+// Изменения в Supabase — добавить колонку если нет:
 //   ALTER TABLE models      ADD COLUMN IF NOT EXISTS deleted_at timestamptz DEFAULT NULL;
 //   ALTER TABLE tags        ADD COLUMN IF NOT EXISTS deleted_at timestamptz DEFAULT NULL;
 //   ALTER TABLE ban_records ADD COLUMN IF NOT EXISTS deleted_at timestamptz DEFAULT NULL;
 //   CREATE INDEX IF NOT EXISTS idx_models_deleted      ON models(user_id, deleted_at);
 //   CREATE INDEX IF NOT EXISTS idx_tags_deleted        ON tags(user_id, deleted_at);
 //   CREATE INDEX IF NOT EXISTS idx_ban_records_deleted ON ban_records(user_id, deleted_at);
+//
+// Изменения в db.js — Models.delete():
+//   БЫЛО:   await db.models.delete(id); enqueue('delete')
+//   СТАЛО:  await Models.softDelete(id)  ← новый метод ниже
+//
+// Изменения в db.js — Models.getAll() и search():
+//   Добавить фильтр: .filter(m => !m._deleted_at)
 
 const TABLE_MAP = {
   models:     'models',
@@ -21,15 +40,16 @@ const TABLE_MAP = {
   banRecords: 'ban_records',
 };
 
-// Записи мягко удалённые дольше этого числа дней — удаляются физически при GC
-const SOFT_DELETE_TTL_DAYS = 30;
+// GC: записи помеченные deleted_at старше этого числа дней удаляются физически
+const GC_TTL_DAYS = 30;
 
-// ── local → remote ────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────
+// Маппинг: local → remote
+// ─────────────────────────────────────────────────────────────────
 function toRemote(table, local, userId) {
   const base = {
     user_id:    userId,
     updated_at: new Date(local._local_updated || Date.now()).toISOString(),
-    // Передаём deleted_at на сервер — null означает "живая запись"
     deleted_at: local._deleted_at || null,
   };
 
@@ -88,8 +108,10 @@ function toRemote(table, local, userId) {
   return { ...base, ...local };
 }
 
-// ── remote → local ────────────────────────────────────────────────
-// existing — текущая локальная запись (если есть), нужна чтобы не затирать _local_updated
+// ─────────────────────────────────────────────────────────────────
+// Маппинг: remote → local
+// existing передаётся чтобы сохранить _local_updated пользователя
+// ─────────────────────────────────────────────────────────────────
 function toLocal(table, remote, existing = null) {
   const jp = (v, fb) => {
     if (v == null) return fb;
@@ -97,6 +119,8 @@ function toLocal(table, remote, existing = null) {
     try { return JSON.parse(v); } catch { return fb; }
   };
 
+  // ВАЖНО: _local_updated не перезаписываем серверным временем.
+  // Иначе при следующем pull локальные изменения будут казаться "старее" серверных.
   const remoteTs     = remote.updated_at ? new Date(remote.updated_at).getTime() : Date.now();
   const localUpdated = existing?._local_updated || remoteTs;
 
@@ -154,7 +178,9 @@ function toLocal(table, remote, existing = null) {
   return remote;
 }
 
-// ── SyncManager ───────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────
+// SyncManager
+// ─────────────────────────────────────────────────────────────────
 const SyncManager = {
   _flushing:         false,
   _syncing:          false,
@@ -162,6 +188,7 @@ const SyncManager = {
   _listenersStarted: false,
   _realtimeChannel:  null,
 
+  // ── Auth ────────────────────────────────────────────────────────
   async userId() {
     if (this._userId) return this._userId;
     const user = await Auth.current();
@@ -169,9 +196,10 @@ const SyncManager = {
     return this._userId;
   },
 
-  // ── Soft delete ────────────────────────────────────────────────
-  // Помечает запись как удалённую — физически не удаляет.
-  // UI должен фильтровать: db.models.filter(r => !r._deleted_at).toArray()
+  // ── Soft Delete ─────────────────────────────────────────────────
+  // Вызывается вместо физического удаления из Models.delete(), Tags.delete(), BanRecords.delete().
+  // Помечает запись локально → ставит upsert в очередь → сервер получает deleted_at → другие устройства тянут через pull.
+  // UI фильтрует записи с _deleted_at !== null.
   async softDelete(table, recordId) {
     const rid       = parseInt(recordId);
     const deletedAt = new Date().toISOString();
@@ -181,71 +209,23 @@ const SyncManager = {
       _local_updated: Date.now(),
     });
 
-    // Soft delete идёт как upsert — просто обновляем поле deleted_at
     await this.enqueue(table, 'upsert', recordId);
+    if (navigator.onLine) this.flush();
   },
 
-  // ── Restore ───────────────────────────────────────────────────
-  // Сбрасывает deleted_at — запись снова живая и появится в UI
+  // ── Restore ─────────────────────────────────────────────────────
   async restore(table, recordId) {
-    const rid = parseInt(recordId);
-
-    await db[table]?.update(rid, {
+    await db[table]?.update(parseInt(recordId), {
       _deleted_at:    null,
       _local_updated: Date.now(),
     });
-
     await this.enqueue(table, 'upsert', recordId);
+    if (navigator.onLine) this.flush();
   },
 
-  // ── Garbage Collection ─────────────────────────────────────────
-  // Физически удаляет soft-deleted записи старше SOFT_DELETE_TTL_DAYS дней.
-  // Вызывать при старте приложения или раз в сутки.
-  // На сервере можно дополнительно настроить Supabase scheduled function.
-  async gc() {
-    const userId = await this.userId();
-    if (!userId) return 0;
-
-    const cutoffIso = new Date(Date.now() - SOFT_DELETE_TTL_DAYS * 86_400_000).toISOString();
-    const cutoffMs  = new Date(cutoffIso).getTime();
-    const sb        = getSupabase();
-    let   purged    = 0;
-
-    for (const [localTbl, remoteTbl] of Object.entries(TABLE_MAP)) {
-      try {
-        // Удаляем физически на сервере записи старше TTL
-        const { error } = await sb
-          .from(remoteTbl)
-          .delete()
-          .eq('user_id', userId)
-          .not('deleted_at', 'is', null)
-          .lt('deleted_at', cutoffIso);
-
-        if (error) {
-          console.warn(`[GC] Remote failed [${localTbl}]:`, error.message);
-          continue;
-        }
-
-        // Удаляем физически локально
-        const stale = await db[localTbl]
-          .filter(r => r._deleted_at != null && new Date(r._deleted_at).getTime() < cutoffMs)
-          .toArray()
-          .catch(() => []);
-
-        for (const r of stale) {
-          await db[localTbl].delete(r.id).catch(() => {});
-          purged++;
-        }
-      } catch (e) {
-        console.warn(`[GC] Failed [${localTbl}]:`, e.message);
-      }
-    }
-
-    console.log(`[GC] Purged ${purged} records older than ${SOFT_DELETE_TTL_DAYS} days`);
-    return purged;
-  },
-
-  // ── Enqueue ────────────────────────────────────────────────────
+  // ── Enqueue ─────────────────────────────────────────────────────
+  // Дедупликация: если upsert для той же записи уже в очереди — удаляем и добавляем заново
+  // (новый payload + новый timestamp = честный конец очереди)
   async enqueue(table, operation, recordId, payload = null) {
     const rid = String(recordId);
 
@@ -259,43 +239,36 @@ const SyncManager = {
       if (existing) {
         await db.syncQueue.delete(existing.id).catch(() => {});
         await db.syncQueue.add({
-          table,
-          operation,
-          recordId:  rid,
+          table, operation, recordId: rid,
           payload:   payload ? JSON.stringify(payload) : existing.payload,
-          createdAt: Date.now(),
-          retries:   0,
+          createdAt: Date.now(), retries: 0,
         });
         return;
       }
     }
 
+    // При delete — убираем pending upsert (они уже не нужны) и сохраняем remote_id
     if (operation === 'delete') {
       await db.syncQueue
         .where('[table+operation+recordId]')
         .equals([table, 'upsert', rid])
-        .delete()
-        .catch(() => {});
+        .delete().catch(() => {});
 
+      // Сохраняем remote_id пока запись ещё в IndexedDB
       if (!payload) {
-        const localRecord = await db[table]?.get(parseInt(rid)).catch(() => null);
-        if (localRecord?.remote_id) {
-          payload = { remote_id: localRecord.remote_id };
-        }
+        const rec = await db[table]?.get(parseInt(rid)).catch(() => null);
+        if (rec?.remote_id) payload = { remote_id: rec.remote_id };
       }
     }
 
     await db.syncQueue.add({
-      table,
-      operation,
-      recordId:  rid,
+      table, operation, recordId: rid,
       payload:   payload ? JSON.stringify(payload) : null,
-      createdAt: Date.now(),
-      retries:   0,
+      createdAt: Date.now(), retries: 0,
     });
   },
 
-  // ── Push ───────────────────────────────────────────────────────
+  // ── Flush (Push) ────────────────────────────────────────────────
   async flush() {
     if (this._flushing) return;
     const userId = await this.userId();
@@ -308,10 +281,10 @@ const SyncManager = {
       const queue = await db.syncQueue.orderBy('createdAt').toArray();
       for (const op of queue) {
         try {
-          await this._exec(sb, userId, op);
+          await this._execOp(sb, userId, op);
           await db.syncQueue.delete(op.id).catch(() => {});
         } catch (e) {
-          console.warn(`SyncOp failed [${op.table}/${op.operation}]:`, e.message);
+          console.warn(`[Sync] Op failed [${op.table}/${op.operation}]:`, e.message);
           if ((op.retries || 0) >= 5) {
             await db.syncQueue.delete(op.id);
           } else {
@@ -324,28 +297,32 @@ const SyncManager = {
     }
   },
 
-  async _exec(sb, userId, op) {
+  async _execOp(sb, userId, op) {
     const remoteTbl = TABLE_MAP[op.table] || op.table;
 
+    // Hard delete — используется только если нужно физически удалить (например устаревший GC)
+    // В обычном UI удаление идёт как softDelete → upsert с deleted_at
     if (op.operation === 'delete') {
-      // Hard delete — используется только напрямую (GC), UI работает через softDelete
       let remoteId = null;
+
+      // Сначала из payload (записали при enqueue пока запись ещё была в БД)
       if (op.payload) {
         try { remoteId = JSON.parse(op.payload)?.remote_id ?? null; } catch {}
       }
+      // Fallback: ищем локальную запись
       if (!remoteId) {
-        const local = await db[op.table]?.get(parseInt(op.recordId));
+        const local = await db[op.table]?.get(parseInt(op.recordId)).catch(() => null);
         if (local?.remote_id) remoteId = local.remote_id;
       }
+      // Последний fallback: ищем на сервере по local_id
       if (!remoteId) {
         const { data } = await sb
-          .from(remoteTbl)
-          .select('id')
-          .eq('user_id', userId)
-          .eq('local_id', String(op.recordId))
+          .from(remoteTbl).select('id')
+          .eq('user_id', userId).eq('local_id', op.recordId)
           .maybeSingle();
         remoteId = data?.id ?? null;
       }
+
       if (remoteId) {
         const { error } = await sb.from(remoteTbl).delete().eq('id', remoteId);
         if (error) throw error;
@@ -353,19 +330,20 @@ const SyncManager = {
       return;
     }
 
-    // upsert — включает soft delete (deleted_at передаётся через toRemote)
+    // Upsert — включая soft delete (deleted_at летит в toRemote)
     let record = null;
     if (op.payload) {
-      try { record = JSON.parse(op.payload); } catch { record = null; }
+      try { record = JSON.parse(op.payload); } catch {}
     }
     if (!record) {
-      record = await db[op.table]?.get(parseInt(op.recordId));
-      if (!record) {
-        console.warn(`SyncManager._exec: record ${op.table}#${op.recordId} not found, skipping`);
-        return;
-      }
+      record = await db[op.table]?.get(parseInt(op.recordId)).catch(() => null);
+    }
+    if (!record) {
+      console.warn(`[Sync] Record ${op.table}#${op.recordId} not found, skipping`);
+      return;
     }
 
+    // Settings — особый случай
     if (op.table === 'settings') {
       const { error } = await sb.from('settings').upsert(
         { user_id: userId, weights: JSON.stringify(record.value || {}), updated_at: new Date().toISOString() },
@@ -381,32 +359,32 @@ const SyncManager = {
     const { data, error } = await sb
       .from(remoteTbl)
       .upsert(rowWithoutId, { onConflict: 'local_id,user_id', ignoreDuplicates: false })
-      .select('id')
-      .single();
+      .select('id').single();
 
     if (error) throw error;
+
+    // Сохраняем remote_id — критично для корректного merge при следующем pull
     if (data?.id) {
-      await db[op.table]?.update(parseInt(op.recordId), { remote_id: data.id });
+      await db[op.table]?.update(parseInt(op.recordId), { remote_id: data.id }).catch(() => {});
     }
   },
 
-  // ── Pull ───────────────────────────────────────────────────────
+  // ── Pull ────────────────────────────────────────────────────────
+  // Тянет все изменения с сервера (включая deleted_at) начиная с lastPullAt.
+  // Применяет только если серверная версия новее локальной И нет pending изменений.
   async pull() {
     const userId = await this.userId();
     if (!userId) return 0;
 
     const sb       = getSupabase();
-    const meta     = await db.syncMeta.get('lastPullAt');
+    const meta     = await db.syncMeta.get('lastPullAt').catch(() => null);
     const lastPull = meta?.value || '1970-01-01T00:00:00.000Z';
-    let merged     = 0;
+    let   merged   = 0;
 
     for (const [localTbl, remoteTbl] of Object.entries(TABLE_MAP)) {
       try {
-        // Тянем все записи включая soft-deleted — удаление с другого устройства
-        // должно синхронизироваться сюда через deleted_at
         const { data, error } = await sb
-          .from(remoteTbl)
-          .select('*')
+          .from(remoteTbl).select('*')
           .eq('user_id', userId)
           .gt('updated_at', lastPull);
 
@@ -414,52 +392,65 @@ const SyncManager = {
         if (!data?.length) continue;
 
         for (const row of data) {
-          let existing = await db[localTbl].where('remote_id').equals(row.id).first().catch(() => null);
+          // Ищем локальную запись: сначала по remote_id, потом по local_id
+          let existing = null;
+
+          if (row.id) {
+            existing = await db[localTbl].where('remote_id').equals(row.id).first().catch(() => null);
+          }
 
           if (!existing && row.local_id) {
-            const localNumId = parseInt(row.local_id);
-            if (!isNaN(localNumId)) {
-              existing = await db[localTbl].get(localNumId);
-              if (existing) {
-                await db[localTbl].update(existing.id, { remote_id: row.id });
+            const numId = parseInt(row.local_id);
+            if (!isNaN(numId)) {
+              existing = await db[localTbl].get(numId).catch(() => null);
+              if (existing && !existing.remote_id) {
+                // Нашли по local_id — сразу фиксируем remote_id чтобы не дублировать
+                await db[localTbl].update(existing.id, { remote_id: row.id }).catch(() => {});
+                existing = { ...existing, remote_id: row.id };
               }
             }
           }
 
-          const localObj = toLocal(localTbl, row, existing);
+          const remoteTs = row.updated_at ? new Date(row.updated_at).getTime() : 0;
+          const localTs  = existing?._local_updated || existing?.date_added || 0;
 
           if (existing) {
-            const remoteTs = new Date(row.updated_at).getTime();
-            const localTs  = existing._local_updated || existing.date_added || 0;
+            // Серверная версия не новее — пропускаем
+            if (remoteTs <= localTs) continue;
 
-            if (remoteTs > localTs) {
-              const pendingOp = await db.syncQueue
-                .where('[table+operation+recordId]')
-                .equals([localTbl, 'upsert', String(existing.id)])
-                .first()
-                .catch(() => null);
+            // Есть pending изменения от пользователя — не перезаписываем
+            const hasPending = await db.syncQueue
+              .where('[table+operation+recordId]')
+              .equals([localTbl, 'upsert', String(existing.id)])
+              .first().catch(() => null);
 
-              if (!pendingOp) {
-                await db[localTbl].update(existing.id, { ...localObj, id: existing.id });
-                merged++;
-              }
-            }
+            if (hasPending) continue;
+
+            // Применяем серверную версию (включая deleted_at)
+            const localObj = toLocal(localTbl, row, existing);
+            await db[localTbl].update(existing.id, { ...localObj, id: existing.id });
+            merged++;
+
           } else {
-            // Новая запись — добавляем даже если soft-deleted
-            // (UI не покажет — фильтрует по _deleted_at)
-            await db[localTbl].add(localObj);
+            // Новая запись с другого устройства
+            const localObj = toLocal(localTbl, row, null);
+            await db[localTbl].add(localObj).catch(() => {
+              // Если add упал (например нарушение уникальности) — молча пропускаем
+            });
             merged++;
           }
         }
 
       } catch (e) {
-        console.warn(`Pull failed [${localTbl}]:`, e.message);
+        console.warn(`[Sync] Pull failed [${localTbl}]:`, e.message);
       }
     }
 
     // Settings pull
     try {
-      const { data } = await sb.from('settings').select('weights').eq('user_id', userId).maybeSingle();
+      const { data } = await sb
+        .from('settings').select('weights')
+        .eq('user_id', userId).maybeSingle();
       if (data?.weights) {
         const parsed = typeof data.weights === 'object' ? data.weights : JSON.parse(data.weights);
         await db.settings.put({ key: 'weights', value: parsed });
@@ -471,9 +462,47 @@ const SyncManager = {
     return merged;
   },
 
-  // ── Realtime ──────────────────────────────────────────────────
-  // Supabase Realtime — мгновенная синхронизация между устройствами без polling.
-  // Дополняет pull/flush для online-режима. При оффлайне — отключается автоматически.
+  // ── GC ──────────────────────────────────────────────────────────
+  // Физически удаляет soft-deleted записи старше GC_TTL_DAYS.
+  // Вызывать при старте приложения раз в сутки.
+  async gc() {
+    const userId = await this.userId();
+    if (!userId) return 0;
+
+    const cutoffIso = new Date(Date.now() - GC_TTL_DAYS * 86_400_000).toISOString();
+    const cutoffMs  = new Date(cutoffIso).getTime();
+    const sb        = getSupabase();
+    let   purged    = 0;
+
+    for (const [localTbl, remoteTbl] of Object.entries(TABLE_MAP)) {
+      try {
+        // Физически удаляем на сервере
+        await sb.from(remoteTbl).delete()
+          .eq('user_id', userId)
+          .not('deleted_at', 'is', null)
+          .lt('deleted_at', cutoffIso);
+
+        // Физически удаляем локально
+        const stale = await db[localTbl]
+          .filter(r => r._deleted_at != null && new Date(r._deleted_at).getTime() < cutoffMs)
+          .toArray().catch(() => []);
+
+        for (const r of stale) {
+          await db[localTbl].delete(r.id).catch(() => {});
+          purged++;
+        }
+      } catch (e) {
+        console.warn(`[GC] Failed [${localTbl}]:`, e.message);
+      }
+    }
+
+    if (purged > 0) console.log(`[GC] Purged ${purged} records older than ${GC_TTL_DAYS} days`);
+    return purged;
+  },
+
+  // ── Realtime ────────────────────────────────────────────────────
+  // Supabase Realtime — мгновенная синхронизация между устройствами.
+  // Дополняет pull/flush, не заменяет.
   async startRealtime() {
     const userId = await this.userId();
     if (!userId || this._realtimeChannel) return;
@@ -481,18 +510,19 @@ const SyncManager = {
     const sb = getSupabase();
 
     this._realtimeChannel = sb
-      .channel(`psbase_sync_${userId}`)
+      .channel(`psbase_${userId}`)
       .on('postgres_changes', {
-        event:  '*',
-        schema: 'public',
+        event: '*', schema: 'public',
         filter: `user_id=eq.${userId}`,
-      }, (payload) => this._handleRealtimeEvent(payload))
+      }, (payload) => this._onRealtimeEvent(payload))
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
           console.log('[Realtime] Connected');
+          updateSyncIndicator();
         } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
           console.warn('[Realtime] Disconnected');
           this._realtimeChannel = null;
+          updateSyncIndicator();
         }
       });
   },
@@ -501,92 +531,87 @@ const SyncManager = {
     if (!this._realtimeChannel) return;
     getSupabase().removeChannel(this._realtimeChannel);
     this._realtimeChannel = null;
-    console.log('[Realtime] Stopped');
   },
 
-  async _handleRealtimeEvent(payload) {
-    const { eventType, table: remoteTbl, new: newRow, old: oldRow } = payload;
-
+  async _onRealtimeEvent({ eventType, table: remoteTbl, new: newRow, old: oldRow }) {
     const localTbl = Object.keys(TABLE_MAP).find(k => TABLE_MAP[k] === remoteTbl);
     if (!localTbl) return;
 
     try {
       if (eventType === 'DELETE') {
-        // Hard delete с другого устройства
+        // Hard delete с сервера (редко, только через GC)
         if (oldRow?.id) {
-          const existing = await db[localTbl].where('remote_id').equals(oldRow.id).first().catch(() => null);
-          if (existing) {
-            await db[localTbl].delete(existing.id);
-            this._notifyUIChange(localTbl, 'delete', existing.id);
-          }
+          const rec = await db[localTbl].where('remote_id').equals(oldRow.id).first().catch(() => null);
+          if (rec) await db[localTbl].delete(rec.id).catch(() => {});
         }
+        this._notifyChange();
         return;
       }
 
       if (!newRow) return;
 
       const existing = await db[localTbl].where('remote_id').equals(newRow.id).first().catch(() => null);
-      const localObj = toLocal(localTbl, newRow, existing);
 
+      // Не трогаем если есть pending изменения
       if (existing) {
-        const remoteTs = new Date(newRow.updated_at).getTime();
-        const localTs  = existing._local_updated || 0;
-        if (remoteTs <= localTs) return; // наши данные новее
-
-        const pendingOp = await db.syncQueue
+        const hasPending = await db.syncQueue
           .where('[table+operation+recordId]')
           .equals([localTbl, 'upsert', String(existing.id)])
-          .first()
-          .catch(() => null);
+          .first().catch(() => null);
+        if (hasPending) return;
 
-        if (!pendingOp) {
-          await db[localTbl].update(existing.id, { ...localObj, id: existing.id });
-          this._notifyUIChange(localTbl, 'update', existing.id);
-        }
+        const remoteTs = new Date(newRow.updated_at).getTime();
+        const localTs  = existing._local_updated || 0;
+        if (remoteTs <= localTs) return;
+
+        const localObj = toLocal(localTbl, newRow, existing);
+        await db[localTbl].update(existing.id, { ...localObj, id: existing.id });
       } else {
-        const newId = await db[localTbl].add(localObj);
-        this._notifyUIChange(localTbl, 'insert', newId);
+        const localObj = toLocal(localTbl, newRow, null);
+        await db[localTbl].add(localObj).catch(() => {});
       }
+
+      this._notifyChange(localTbl);
     } catch (e) {
-      console.warn('[Realtime] Failed to apply event:', e.message);
+      console.warn('[Realtime] Event error:', e.message);
     }
   },
 
-  // Диспатчит кастомное событие — UI слушает через window.addEventListener('sync:change', ...)
-  _notifyUIChange(table, eventType, recordId) {
-    window.dispatchEvent(new CustomEvent('sync:change', {
-      detail: { table, eventType, recordId }
-    }));
-    if (table === 'models' && typeof reloadGrid === 'function') {
-      if (State?.view === 'home') reloadGrid();
+  _notifyChange(table) {
+    updateSyncIndicator();
+    // Перезагружаем грид если нужно
+    if (typeof reloadGrid === 'function' && State?.view === 'home') {
+      reloadGrid();
     }
+    window.dispatchEvent(new CustomEvent('sync:change', { detail: { table } }));
   },
 
-  // ── Full sync ─────────────────────────────────────────────────
+  // ── Full sync ────────────────────────────────────────────────────
   async sync() {
-    if (this._syncing) return { skipped: true };
+    if (this._syncing)      return { skipped: true };
     if (!navigator.onLine) return { offline: true };
+
     this._syncing = true;
     try {
       const pulled = await this.pull();
       await this.flush();
+      updateSyncIndicator();
       return { pulled, ok: true };
     } catch (e) {
-      console.error('Sync error:', e);
+      console.error('[Sync] Error:', e);
       return { error: e.message };
     } finally {
       this._syncing = false;
     }
   },
 
-  // ── Pending count for UI indicator ───────────────────────────
+  // ── Status ──────────────────────────────────────────────────────
   async pendingCount() {
-    return db.syncQueue.count();
+    return db.syncQueue.count().catch(() => 0);
   },
 
-  // ── Status for Settings UI ───────────────────────────────────
   async getStatus() {
-    const pending = await db.syncQueue.count();
+    const pending = await db.syncQueue.count().catch(() => 0);
     const meta    = await db.syncMeta.get('lastPullAt').catch(() => null);
     return {
       pending,
@@ -597,7 +622,7 @@ const SyncManager = {
     };
   },
 
-  // ── Auto-listeners ────────────────────────────────────────────
+  // ── Listeners ────────────────────────────────────────────────────
   startListeners() {
     if (this._listenersStarted) return;
     this._listenersStarted = true;
@@ -607,7 +632,7 @@ const SyncManager = {
       const result = await this.sync();
       if (result.pulled > 0) {
         toast(`Получено ${result.pulled} обновлений`, 'success', 2500);
-        if (State?.view === 'home') reloadGrid();
+        if (typeof reloadGrid === 'function' && State?.view === 'home') reloadGrid();
       }
       await this.startRealtime();
       updateSyncIndicator();
@@ -620,3 +645,5 @@ const SyncManager = {
     });
   },
 };
+
+window.SyncManager = SyncManager;
