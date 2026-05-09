@@ -74,7 +74,7 @@ function toRemote(table, local, userId) {
     potential:        local.potential      || null,
     drops:            local.drops          || 0,
     is_favorite:      local.is_favorite    || false,
-    tags:             JSON.stringify(local.tags             || []),
+    tags:             JSON.stringify(local.tags || []),  // remote IDs — резолвятся в _execOp
     links:            JSON.stringify(local.links            || []),
     main_photo:       local.main_photo     || null,
     body_part_photos: JSON.stringify(local.body_part_photos || {}),
@@ -143,7 +143,7 @@ function toLocal(table, remote, existing = null) {
     potential:        remote.potential      || 0,
     drops:            remote.drops          || 0,
     is_favorite:      remote.is_favorite    || false,
-    tags:             jp(remote.tags,             []),
+    tags:             jp(remote.tags, []),  // будут сконвертированы в _applyRemoteRow
     links:            jp(remote.links,            []),
     main_photo:       remote.main_photo     || '',
     body_part_photos: jp(remote.body_part_photos, {}),
@@ -268,6 +268,38 @@ const SyncManager = {
     });
   },
 
+  // ── Tag ID resolution ──────────────────────────────────────────
+  // Теги хранятся локально как числовые Dexie ID.
+  // На сервере — как remote_id тегов.
+  // При push: локальный ID → remote_id
+  // При pull: remote_id → локальный ID
+
+  async _resolveTagsToRemote(localTagIds) {
+    if (!localTagIds?.length) return [];
+    const remoteIds = [];
+    for (const lid of localTagIds) {
+      const tag = await db.tags.get(lid).catch(() => null);
+      if (tag?.remote_id) {
+        remoteIds.push(tag.remote_id);
+      }
+      // Если нет remote_id — тег ещё не синхронизирован, пропускаем
+    }
+    return remoteIds;
+  },
+
+  async _resolveTagsToLocal(remoteTagIds) {
+    if (!remoteTagIds?.length) return [];
+    const localIds = [];
+    for (const rid of remoteTagIds) {
+      const tag = await db.tags.where('remote_id').equals(rid).first().catch(() => null);
+      if (tag) {
+        localIds.push(tag.id);
+      }
+      // Если тег не найден локально — его ещё не синхронизировали, пропускаем
+    }
+    return localIds;
+  },
+
   // ── Flush (Push) ────────────────────────────────────────────────
   async flush() {
     if (this._flushing) return;
@@ -313,6 +345,11 @@ const SyncManager = {
   }
 
   // 🧠 1. Если есть remote_id — обновляем строго по нему
+  // Резолвим теги: локальные ID → remote UUID (чтобы теги работали на всех устройствах)
+  if (op.table === 'models' && record.tags?.length) {
+    record = { ...record, tags: await this._resolveTagsToRemote(record.tags) };
+  }
+
   if (record.remote_id) {
     const row = toRemote(op.table, record, userId);
 
@@ -409,6 +446,11 @@ const SyncManager = {
       }
 
       const local = toLocal(localTbl, row, existing);
+
+      // Для моделей: конвертируем remote tag UUIDs → локальные Dexie ID
+      if (localTbl === 'models' && local.tags?.length) {
+        local.tags = await this._resolveTagsToLocal(local.tags);
+      }
 
       if (existing) {
         // 🔥 3. ПРОВЕРКА: есть ли локальные изменения (pending в очереди)
