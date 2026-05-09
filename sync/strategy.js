@@ -373,7 +373,7 @@ const SyncManager = {
   // ── Pull ────────────────────────────────────────────────────────
   // Тянет все изменения с сервера (включая deleted_at) начиная с lastPullAt.
   // Применяет только если серверная версия новее локальной И нет pending изменений.
-  async pull(force = false) {
+ async pull(force = false) {
   const userId = await this.userId();
   if (!userId) return 0;
 
@@ -392,7 +392,7 @@ const SyncManager = {
     for (const row of data) {
       let existing = null;
 
-      // сначала ищем по remote_id
+      // 🔎 1. ищем по remote_id
       if (row.id) {
         existing = await db[localTbl]
           .where('remote_id')
@@ -400,7 +400,7 @@ const SyncManager = {
           .first();
       }
 
-      // fallback — по local_id
+      // 🔎 2. fallback по local_id
       if (!existing && row.local_id) {
         existing = await db[localTbl]
           .where('id')
@@ -411,13 +411,32 @@ const SyncManager = {
       const local = toLocal(localTbl, row, existing);
 
       if (existing) {
-        // 🧠 обновляем только если сервер новее
-        const remoteTs = new Date(row.updated_at).getTime();
-        if ((existing._local_updated || 0) <= remoteTs) {
+        // 🔥 3. ПРОВЕРКА: есть ли локальные изменения (pending в очереди)
+        const pending = await db.syncQueue
+          .where('[table+operation+recordId]')
+          .equals([localTbl, 'upsert', String(existing.id)])
+          .first()
+          .catch(() => null);
+
+        if (pending) {
+          // 👉 есть локальные изменения — НЕ трогаем запись
+          continue;
+        }
+
+        // 🧠 4. сравнение времени (fallback защита)
+        const remoteTs = row.updated_at
+          ? new Date(row.updated_at).getTime()
+          : 0;
+
+        const localTs = existing._local_updated || 0;
+
+        if (remoteTs >= localTs) {
           await db[localTbl].update(existing.id, local);
           merged++;
         }
+
       } else {
+        // 🆕 новая запись
         await db[localTbl].add(local);
         merged++;
       }
