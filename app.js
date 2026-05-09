@@ -1411,52 +1411,64 @@ async function castingBanModel() {
 // ── INIT ────────────────────────────────────────────────────────────
 // ── INIT ────────────────────────────────────────────────────────────
 async function init() {
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(()=>{});
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
 
-  document.querySelectorAll('.nav-btn').forEach(btn=>btn.addEventListener('click',()=>nav(btn.dataset.nav)));
-
-  // Supabase настроен?
+  document.querySelectorAll('.nav-btn').forEach(btn => btn.addEventListener('click', () => nav(btn.dataset.nav)));
+  
   const sbConfigured = CONFIG.supabase.url !== 'https://YOURPROJECT.supabase.co';
 
   if (sbConfigured) {
-    // Supabase настроен — проверяем текущую сессию
     const user = await Auth.current();
     if (user) {
-      // Уже залогинен — сразу запускаем приложение
       State.user = user;
       SyncManager._userId = user.id;
+      
+      // Инициализация синхронизации для залогиненного пользователя
       SyncManager.startListeners();
-      // await seedDemoData();
+      
       nav('home');
-      // Фоновая синхронизация — не блокирует UI
+
+        // 1. Сборка мусора (GC) — выполняется один раз при запуске
+ const lastGC = localStorage.getItem('psbase-last-gc');
+if (!lastGC || Date.now() - parseInt(lastGC) > 86_400_000) {
+  SyncManager.gc();
+  localStorage.setItem('psbase-last-gc', String(Date.now()));
+}
+
       if (navigator.onLine) {
+        // Запускаем реалтайм и первичную синхронизацию
+        SyncManager.startRealtime(); 
         SyncManager.sync().then(r => {
-          if (r.pulled > 0) { toast(`Получено ${r.pulled} обновлений`, 'info', 2500); reloadGrid(); }
+          if (r.pulled > 0) { 
+            toast(`Получено ${r.pulled} обновлений`, 'info', 2500); 
+            reloadGrid(); 
+          }
           updateSyncIndicator();
         });
       }
     } else {
-      // Не залогинен — показываем экран входа
       renderAuth();
     }
 
-    // Слушаем смену состояния (logout/login из другой вкладки)
     Auth.onAuthChange(async user => {
       const wasAuthed = !!State.user;
       State.user = user;
       SyncManager._userId = user ? user.id : null;
+
       if (user && !wasAuthed) {
-        // Только что вошли — синхронизируем
         SyncManager.startListeners();
-        // await seedDemoData();
-        if (navigator.onLine) SyncManager.sync().then(() => updateSyncIndicator());
+        if (navigator.onLine) {
+          SyncManager.startRealtime(); // Включаем реалтайм при логине
+          SyncManager.sync().then(() => updateSyncIndicator());
+        }
       }
       updateSyncIndicator();
     });
+
   } else {
-    // Supabase не настроен — работаем локально без авторизации
-    document.querySelector('.bottom-nav').style.display='';
-    // await seedDemoData();
+    // Локальный режим
+    document.querySelector('.bottom-nav').style.display = '';
+    SyncManager.startListeners(); // Слушатели нужны даже локально для работы IndexedDB
     nav('home');
   }
 }
