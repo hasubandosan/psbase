@@ -184,6 +184,39 @@ async function processPhotoForSave(dataUrlOrFile) {
   return dataUrlOrFile; // fallback: DataURL в IndexedDB
 }
 
+function normalizeModel(m) {
+  return {
+    name: (m.name || '').trim(),
+    aliases: m.aliases || '',
+    country: m.country || '',
+
+    main_photo: m.main_photo || '',
+    body_part_photos: m.body_part_photos || {},
+    extra_photos: m.extra_photos || [],
+    links: m.links || [],
+    tags: m.tags || [],
+
+    face_rate: m.face_rate || 0,
+    shoulders_rate: m.shoulders_rate || 0,
+    waist_rate: m.waist_rate || 0,
+    hips_rate: m.hips_rate || 0,
+    figure_rate: m.figure_rate || 0,
+
+    date_of_birth: m.date_of_birth || null,
+    date_of_death: m.date_of_death || null,
+
+    is_favorite: m.is_favorite || false,
+    drops: m.drops || 0,
+
+    date_added: m.date_added || Date.now(),
+
+    // ❗ СИСТЕМНЫЕ ПОЛЯ ОБНУЛЯЕМ
+    remote_id: null,
+    _local_updated: Date.now(),
+    _deleted_at: null,
+  };
+}
+
 // ── Models CRUD ───────────────────────────────────────────────────
 const Models = {
 async getAll() {
