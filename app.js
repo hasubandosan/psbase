@@ -656,6 +656,7 @@ async function renderAddEdit(id) {
         <div class="sr-photo-wrap">
           <div class="sr-photo" id="srp-${part}">
             <input type="file" accept="image/*" class="bpp-file sr-file-inp" data-part="${part}">
+            <button type="button" class="bpp-url-btn" onclick="promptPhotoUrl('bpp','${part}')" title="Вставить URL">🔗</button>
             ${photoSrc?`<img src="${photoSrc}" alt="${BPL[part]}" onclick="viewImg('${photo}')">`:`<div class="bph">📷</div>`}
           </div>
           ${photo?`<button class="bpart-crop-btn sr-crop-btn" onclick="cropBpp('${part}')">✂</button>`:''}
@@ -684,6 +685,7 @@ async function renderAddEdit(id) {
       <div class="photo-wrap" id="main-photo-wrap">
         <div class="photo-upload" id="main-upload">
           <input type="file" id="main-file" accept="image/*">
+          <button type="button" class="btn btn-ghost photo-url-btn" onclick="promptPhotoUrl('main')" style="height:32px;padding:0 10px;font-size:12px;margin-bottom:6px">🔗 Вставить URL</button>
           <div class="photo-upload-box" id="main-box">
             ${m?.main_photo
               ?`<img class="photo-preview" id="main-img" src="${window.ImageKit?ImageKit.card(m.main_photo):m.main_photo}">`
@@ -814,12 +816,78 @@ function refreshExtraStrip() {
   strip.innerHTML=_formExtra.map((src,i)=>{ const ts=window.ImageKit?ImageKit.thumb(src):src; return `<div class="ep-item ep-remove" onclick="removeExtra(${i})"><img src="${ts}"><span class="ep-del">✕</span></div>`; }).join('');
   const add=document.createElement('div'); add.className='ep-add';
   add.innerHTML=`<input type="file" accept="image/*" id="extra-file" multiple><span>+</span>`;
+  const urlBtn=document.createElement('button'); urlBtn.type='button'; urlBtn.className='btn btn-ghost'; urlBtn.style='height:32px;padding:0 10px;font-size:12px;margin-left:6px;flex-shrink:0'; urlBtn.textContent='🔗 URL'; urlBtn.onclick=()=>promptPhotoUrl('extra');
+  strip.appendChild(urlBtn);
   strip.appendChild(add);
   document.getElementById('extra-file').addEventListener('change',async e=>{
     for(const file of e.target.files){ const url=await handlePhotoFile(file); _formExtra.push(url); }
     refreshExtraStrip();
   });
 }
+// ── Photo URL input ────────────────────────────────────────────────
+// Позволяет вставить прямой URL вместо загрузки файла
+// target: 'main' | 'bpp' | 'extra'
+// part: только для bpp — 'face'|'shoulders' и т.д.
+function promptPhotoUrl(target, part) {
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay';
+  ov.innerHTML = `
+    <div class="modal" style="max-width:420px">
+      <div class="modal-title">🔗 Вставить URL фото</div>
+      <div class="form-group" style="margin-top:12px">
+        <input class="form-input" id="photo-url-inp" placeholder="https://..." style="height:44px" autocomplete="off">
+      </div>
+      <div id="photo-url-preview" style="height:120px;background:var(--bg2,#1a1a1a);border-radius:8px;margin:10px 0;display:flex;align-items:center;justify-content:center;overflow:hidden;color:var(--text3,#555);font-size:13px">
+        Превью появится здесь
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="purl-cancel">Отмена</button>
+        <button class="btn btn-gold" id="purl-ok" disabled>Применить</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+
+  const inp = ov.querySelector('#photo-url-inp');
+  const preview = ov.querySelector('#photo-url-preview');
+  const okBtn = ov.querySelector('#purl-ok');
+
+  // Живое превью при вводе
+  let previewTimer;
+  inp.addEventListener('input', () => {
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(() => {
+      const url = inp.value.trim();
+      if (!url || !url.startsWith('http')) {
+        preview.innerHTML = 'Введите корректный URL';
+        okBtn.disabled = true;
+        return;
+      }
+      preview.innerHTML = `<img src="${url}" style="max-width:100%;max-height:120px;object-fit:contain;border-radius:6px" onerror="this.parentElement.innerHTML='❌ Не удалось загрузить изображение';document.querySelector('#purl-ok').disabled=true" onload="document.querySelector('#purl-ok').disabled=false">`;
+    }, 400);
+  });
+
+  ov.querySelector('#purl-cancel').onclick = () => ov.remove();
+
+  okBtn.onclick = () => {
+    const url = inp.value.trim();
+    if (!url) return;
+    ov.remove();
+    if (target === 'main') {
+      setMainPhoto(url);
+    } else if (target === 'bpp' && part) {
+      setBppPhoto(part, url);
+    } else if (target === 'extra') {
+      _formExtra.push(url);
+      refreshExtraStrip();
+    }
+  };
+
+  // Вставить по Enter
+  inp.addEventListener('keydown', e => { if (e.key === 'Enter' && !okBtn.disabled) okBtn.click(); });
+
+  setTimeout(() => inp.focus(), 50);
+}
+
 function setMainPhoto(src) {
   const box=document.getElementById('main-box');
   if(box) box.innerHTML=`<img class="photo-preview" id="main-img" src="${src}">`;
