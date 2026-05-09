@@ -37,6 +37,16 @@ db.version(7).stores({
   castingQueue: '++id, status, createdAt',
 });
 
+db.version(8).stores({
+  models:       '++id, name, country, is_favorite, drops, overall, potential, date_added, remote_id, _deleted_at',
+  tags:         '++id, name, remote_id, _deleted_at',
+  banRecords:   '++id, name, reason, date_added, remote_id, _deleted_at',
+  settings:     'key',
+  syncQueue:    '++id, [table+operation+recordId], createdAt',
+  syncMeta:     'key',
+  castingQueue: '++id, status, createdAt',
+});
+
 // ── Rating Levels ─────────────────────────────────────────────────
 const RATING_LEVELS = {
   face:      [ {label:'Плохо',value:2}, {label:'Обычно',value:5}, {label:'Симпатично',value:7.5}, {label:'МОДЕЛЬ',value:10} ],
@@ -176,7 +186,11 @@ async function processPhotoForSave(dataUrlOrFile) {
 
 // ── Models CRUD ───────────────────────────────────────────────────
 const Models = {
-  async getAll()    { return db.models.orderBy('date_added').reverse().toArray(); },
+async getAll() {
+    return db.models.orderBy('date_added').reverse()
+      .filter(m => !m._deleted_at)
+      .toArray();
+  },
   async getById(id) { return db.models.get(id); },
 
   async add(data) {
@@ -249,17 +263,7 @@ const Models = {
 
   async delete(id) {
     // Удаляем фото из Storage перед удалением записи
-    if (window.ImageKit && navigator.onLine) {
-      try {
-        const m = await db.models.get(id);
-        if (m) await ImageKit.deleteUrls(ImageKit.collectModelUrls(m));
-      } catch(e) { console.warn('Storage photo delete failed:', e.message); }
-    }
-    await db.models.delete(id);
-    if (window.SyncManager) {
-      await SyncManager.enqueue('models','delete',id);
-      if (navigator.onLine) SyncManager.flush();
-    }
+       await SyncManager.softDelete('models', id);
   },
 
   async changeDrop(id, delta) {
@@ -286,10 +290,12 @@ const Models = {
 
   async search(query) {
     const q = query.toLowerCase();
-    return db.models.filter(m=>
-      m.name.toLowerCase().includes(q)||
-      (m.aliases&&m.aliases.toLowerCase().includes(q))||
-      (m.country&&m.country.toLowerCase().includes(q))
+    return db.models.filter(m =>
+      !m._deleted_at && (
+        m.name.toLowerCase().includes(q) ||
+        (m.aliases && m.aliases.toLowerCase().includes(q)) ||
+        (m.country && m.country.toLowerCase().includes(q))
+      )
     ).toArray();
   },
 
@@ -318,7 +324,9 @@ const Models = {
 
 // ── Tags ──────────────────────────────────────────────────────────
 const Tags = {
-  async getAll() { return db.tags.orderBy('name').toArray(); },
+ async getAll() {
+    return db.tags.orderBy('name').filter(t => !t._deleted_at).toArray();
+  },
   async add(d) {
     const localId = await db.tags.add({ icon:d.icon||'🏷️', name:d.name.trim(), weight:parseFloat(d.weight)||1.0, _local_updated: Date.now() });
     if (window.SyncManager) { await SyncManager.enqueue('tags','upsert',localId); if(navigator.onLine) SyncManager.flush(); }
@@ -328,32 +336,41 @@ const Tags = {
     await db.tags.update(id,{ icon:d.icon, name:d.name.trim(), weight:parseFloat(d.weight)||1.0, _local_updated: Date.now() });
     if (window.SyncManager) { await SyncManager.enqueue('tags','upsert',id); if(navigator.onLine) SyncManager.flush(); }
   },
-  async delete(id) {
+   async delete(id) {
+    // Убираем тег из всех моделей
     const all = await db.models.toArray();
-    for (const m of all) if (m.tags?.includes(id)) await db.models.update(m.id,{tags:m.tags.filter(t=>t!==id)});
-    await db.tags.delete(id);
-    if (window.SyncManager) { await SyncManager.enqueue('tags','delete',id); if(navigator.onLine) SyncManager.flush(); }
+    for (const m of all) {
+      if (m.tags?.includes(id)) {
+        await db.models.update(m.id, { tags: m.tags.filter(t => t !== id), _local_updated: Date.now() });
+        if (window.SyncManager) await SyncManager.enqueue('models', 'upsert', m.id);
+      }
+    }
+    // Soft delete тега
+    await SyncManager.softDelete('tags', id);
   }
 };
 
 // ── Bans ──────────────────────────────────────────────────────────
 const BanRecords = {
-  async getAll() { return db.banRecords.orderBy('date_added').reverse().toArray(); },
+  async getAll() {
+    return db.banRecords.orderBy('date_added').reverse()
+      .filter(b => !b._deleted_at)
+      .toArray();
+  },
   async add(d) {
     const localId = await db.banRecords.add({ name:d.name.trim(), reason:d.reason, description:d.description||'', date_added:Date.now(), _local_updated: Date.now() });
     if (window.SyncManager) { await SyncManager.enqueue('banRecords','upsert',localId); if(navigator.onLine) SyncManager.flush(); }
     return localId;
   },
   async delete(id) {
-    await db.banRecords.delete(id);
-    if (window.SyncManager) { await SyncManager.enqueue('banRecords','delete',id); if(navigator.onLine) SyncManager.flush(); }
+    await SyncManager.softDelete('banRecords', id);
   }
 };
 
 // ── Stats ─────────────────────────────────────────────────────────
 const Stats = {
   async get() {
-    const all = await db.models.toArray();
+    const all = await db.models.filter(m => !m._deleted_at).toArray();
     if (!all.length) return {total:0};
     const avg = f => { const v=all.map(m=>m[f]||0); return Math.round(v.reduce((a,b)=>a+b,0)/v.length*100)/100; };
     const top = (f,n=10) => [...all].sort((a,b)=>(b[f]||0)-(a[f]||0)).slice(0,n);
@@ -387,8 +404,11 @@ const Stats = {
 // ── DataIO ────────────────────────────────────────────────────────
 const DataIO = {
   async exportAll() {
-    const [models,tags,banRecords,weights] = await Promise.all([
-      db.models.toArray(),db.tags.toArray(),db.banRecords.toArray(),Settings.get()
+      const [models, tags, banRecords, weights] = await Promise.all([
+      db.models.filter(m => !m._deleted_at).toArray(),
+      db.tags.filter(t => !t._deleted_at).toArray(),
+      db.banRecords.filter(b => !b._deleted_at).toArray(),
+      Settings.get(),
     ]);
     return JSON.stringify({version:5,exportedAt:Date.now(),models,tags,banRecords,weights},null,2);
   },
