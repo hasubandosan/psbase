@@ -218,25 +218,40 @@ async function continueOffline() {
 async function onUserSignedIn(user) {
   State.user = user;
   SyncManager._userId = user.id;
+
   document.querySelector('.bottom-nav').style.display = '';
-  // Запускаем listeners только один раз
+
+  // listeners
   if (!SyncManager._listenersStarted) {
     SyncManager.startListeners();
     SyncManager._listenersStarted = true;
   }
+
   toast('Добро пожаловать!', 'success', 2000);
-  // await seedDemoData();
+
   nav('home');
   updateSyncIndicator();
-  // Синхронизируем фоново — не блокируем UI
+
+  // 🔥 НОВАЯ ЛОГИКА СИНХРОНИЗАЦИИ
   if (navigator.onLine) {
-    SyncManager.sync().then(r => {
-      if (r.pulled > 0) {
-        toast(`Получено ${r.pulled} обновлений`, 'info', 2500);
+    try {
+      // 1. Сначала отправляем локальные изменения
+      await SyncManager.flush();
+
+      // 2. Потом тянем ВСЁ с сервера (важно!)
+      const pulled = await SyncManager.pull(true);
+
+      if (pulled > 0) {
+        toast(`Синхронизировано: ${pulled}`, 'success', 2500);
         if (State.view === 'home') reloadGrid();
       }
-      updateSyncIndicator();
-    });
+
+    } catch (e) {
+      console.error('[Sync error]', e);
+      toast('Ошибка синхронизации', 'error');
+    }
+
+    updateSyncIndicator();
   }
 }
 
