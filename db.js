@@ -224,42 +224,68 @@ async getAll() {
     return localId;
   },
 
-  async update(id, data) {
-    await checkDuplicate(data.name, data.aliases, id);
-    const scores = await computeModelScores(data);
+async update(id, data) {
+  const oldModel = await db.models.get(id);
 
-    // Обработаем фото
-    data.main_photo = await processPhotoForSave(data.main_photo);
-    data.body_part_photos = Object.fromEntries(await Promise.all(Object.entries(data.body_part_photos || {}).map(async ([k,v]) => [k, await processPhotoForSave(v)])));
-    data.extra_photos = await Promise.all((data.extra_photos || []).map(async v => await processPhotoForSave(v)));
+  if (!oldModel) throw new Error('Model not found');
 
-    // Соберем старые URL фото перед обновлением
-    const oldModel = await db.models.get(id);
-    const oldUrls = oldModel ? ImageKit.collectModelUrls(oldModel) : [];
+  await checkDuplicate(data.name, data.aliases, id);
 
-    await db.models.update(id, {
-      ...data, name:data.name.trim(),
-      age:calcAge(data.date_of_birth),
-      overall:scores.overall, potential:scores.potential,
-      _local_updated: Date.now(),
-    });
+  // 🧠 1. MERGE ДАННЫХ (ключевой фикс)
+  const merged = {
+    ...oldModel,
+    ...data,
+  };
 
-    // Удалим старые фото, которые больше не используются
-    if (window.ImageKit && navigator.onLine) {
-      try {
-        const newModel = await db.models.get(id);
-        const newUrls = newModel ? ImageKit.collectModelUrls(newModel) : [];
-        const toDelete = oldUrls.filter(u => !newUrls.includes(u));
-        if (toDelete.length) await ImageKit.deleteUrls(toDelete);
-      } catch(e) { console.warn('Storage photo delete failed:', e.message); }
-    }
+  // 🧠 2. правильно объединяем body_part_photos
+  merged.body_part_photos = {
+    ...(oldModel.body_part_photos || {}),
+    ...(data.body_part_photos || {}),
+  };
 
-    if (window.SyncManager) {
-      await SyncManager.enqueue('models','upsert',id);
-      if (navigator.onLine) SyncManager.flush();
-    }
-    return id;
-  },
+  // 🧠 3. extra_photos
+  merged.extra_photos = data.extra_photos ?? oldModel.extra_photos;
+
+  // 🧠 4. ссылки
+  merged.links = data.links ?? oldModel.links;
+
+  // 🧠 5. обрабатываем фото
+  merged.main_photo = await processPhotoForSave(merged.main_photo);
+
+  merged.body_part_photos = Object.fromEntries(
+    await Promise.all(
+      Object.entries(merged.body_part_photos).map(async ([k, v]) => [
+        k,
+        await processPhotoForSave(v)
+      ])
+    )
+  );
+
+  merged.extra_photos = await Promise.all(
+    (merged.extra_photos || []).map(v => processPhotoForSave(v))
+  );
+
+  // 🧠 6. пересчёт
+  const scores = await computeModelScores(merged);
+
+  // 🧠 7. обновление
+  await db.models.update(id, {
+    ...merged,
+    name: merged.name.trim(),
+    age: calcAge(merged.date_of_birth),
+    overall: scores.overall,
+    potential: scores.potential,
+    _local_updated: Date.now(),
+  });
+
+  // 🧠 8. sync
+  if (window.SyncManager) {
+    await SyncManager.enqueue('models', 'upsert', id);
+    if (navigator.onLine) SyncManager.flush();
+  }
+
+  return id;
+},
 
   async delete(id) {
     // Удаляем фото из Storage перед удалением записи
