@@ -1131,14 +1131,94 @@ async function exportData() {
   try { const json=await DataIO.exportAll(), a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([json],{type:'application/json'})); a.download=`psbase-${new Date().toISOString().slice(0,10)}.json`; a.click(); toast('Экспорт готов ✓','success'); } catch(e){toast('Ошибка экспорта','error');}
 }
 async function importData(inp) {
-  const file=inp.files[0]; if(!file) return;
-  const text=await file.text();
-  modal(`<div class="modal-title">Импорт данных</div>
-    <p style="color:var(--text2);font-size:14px">Все текущие данные будут <strong>заменены</strong> данными из "${escHtml(file.name)}".</p>
-    <div class="modal-actions"><button class="btn btn-ghost" data-cancel>Отмена</button><button class="btn btn-danger" data-ok>Импортировать</button></div>`,
-    async()=>{ try{await DataIO.importAll(text);toast('Импорт завершён ✓','success');nav('home');}catch(e){toast('Ошибка: '+e.message,'error');} });
-  inp.value='';
+  const file = inp.files[0];
+  if (!file) return;
+
+  const text = await file.text();
+
+  modal(`
+    <div class="modal-title">Импорт данных</div>
+    <p style="color:var(--text2);font-size:14px">
+      Все текущие данные будут <strong>заменены</strong> данными из "${escHtml(file.name)}".
+    </p>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" data-cancel>Отмена</button>
+      <button class="btn btn-danger" data-ok>Импортировать</button>
+    </div>
+  `,
+  async () => {
+    try {
+      // 🔥 ВОТ ЭТО МЕНЯЕМ
+      await importDataSafe(text);
+
+      toast('Импорт завершён ✓', 'success');
+      nav('home');
+
+    } catch (e) {
+      toast('Ошибка: ' + e.message, 'error');
+    }
+  });
+
+  inp.value = '';
 }
+
+async function importDataSafe(text) {
+  const json = JSON.parse(text);
+
+  if (!json.models) {
+    throw new Error('Неверный формат файла');
+  }
+
+  // ⚠️ 1. ОЧИЩАЕМ БАЗУ (раз у тебя "замена")
+  await db.transaction('rw', db.models, db.tags, db.banRecords, async () => {
+    await db.models.clear();
+    await db.tags.clear();
+    await db.banRecords.clear();
+  });
+
+  let added = 0;
+
+  // 🧠 2. Импорт моделей
+  for (const m of json.models) {
+    const model = normalizeModel(m);
+    await Models.add(model);
+    added++;
+  }
+
+  // 🧠 3. (если есть) теги
+  if (json.tags) {
+    for (const t of json.tags) {
+      await db.tags.add({
+        name: t.name || '',
+        icon: t.icon || '🏷️',
+        weight: t.weight || 1.0,
+        _local_updated: Date.now()
+      });
+    }
+  }
+
+  // 🧠 4. бан записи
+  if (json.banRecords) {
+    for (const b of json.banRecords) {
+      await db.banRecords.add({
+        name: b.name || '',
+        reason: b.reason || '',
+        description: b.description || '',
+        date_added: b.date_added || Date.now(),
+        _local_updated: Date.now()
+      });
+    }
+  }
+
+  // 🔥 5. ОБЯЗАТЕЛЬНО: синк
+  if (navigator.onLine && window.SyncManager) {
+    await SyncManager.flush();
+    await SyncManager.pull(true);
+  }
+
+  return added;
+}
+
 function clearAll() {
   modal(`<div class="modal-title">Очистить всё?</div>
     <p style="color:var(--text2);font-size:14px;line-height:1.6">Все модели, теги и баны будут удалены. Необратимо.</p>
