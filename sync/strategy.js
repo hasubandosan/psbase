@@ -298,169 +298,139 @@ const SyncManager = {
   },
 
   async _execOp(sb, userId, op) {
-    const remoteTbl = TABLE_MAP[op.table] || op.table;
+  const remoteTbl = TABLE_MAP[op.table] || op.table;
 
-    // Hard delete — используется только если нужно физически удалить (например устаревший GC)
-    // В обычном UI удаление идёт как softDelete → upsert с deleted_at
-    if (op.operation === 'delete') {
-      let remoteId = null;
+  let record = null;
+  if (op.payload) {
+    try { record = JSON.parse(op.payload); } catch {}
+  }
+  if (!record) {
+    record = await db[op.table]?.get(parseInt(op.recordId)).catch(() => null);
+  }
+  if (!record) {
+    console.warn(`[Sync] Record ${op.table}#${op.recordId} not found`);
+    return;
+  }
 
-      // Сначала из payload (записали при enqueue пока запись ещё была в БД)
-      if (op.payload) {
-        try { remoteId = JSON.parse(op.payload)?.remote_id ?? null; } catch {}
-      }
-      // Fallback: ищем локальную запись
-      if (!remoteId) {
-        const local = await db[op.table]?.get(parseInt(op.recordId)).catch(() => null);
-        if (local?.remote_id) remoteId = local.remote_id;
-      }
-      // Последний fallback: ищем на сервере по local_id
-      if (!remoteId) {
-        const { data } = await sb
-          .from(remoteTbl).select('id')
-          .eq('user_id', userId).eq('local_id', op.recordId)
-          .maybeSingle();
-        remoteId = data?.id ?? null;
-      }
-
-      if (remoteId) {
-        const { error } = await sb.from(remoteTbl).delete().eq('id', remoteId);
-        if (error) throw error;
-      }
-      return;
-    }
-
-    // Upsert — включая soft delete (deleted_at летит в toRemote)
-    let record = null;
-    if (op.payload) {
-      try { record = JSON.parse(op.payload); } catch {}
-    }
-    if (!record) {
-      record = await db[op.table]?.get(parseInt(op.recordId)).catch(() => null);
-    }
-    if (!record) {
-      console.warn(`[Sync] Record ${op.table}#${op.recordId} not found, skipping`);
-      return;
-    }
-
-    // Settings — особый случай
-    if (op.table === 'settings') {
-      const { error } = await sb.from('settings').upsert(
-        { user_id: userId, weights: JSON.stringify(record.value || {}), updated_at: new Date().toISOString() },
-        { onConflict: 'user_id' }
-      );
-      if (error) throw error;
-      return;
-    }
-
+  // 🧠 1. Если есть remote_id — обновляем строго по нему
+  if (record.remote_id) {
     const row = toRemote(op.table, record, userId);
-    const { id: _rid, ...rowWithoutId } = row;
 
-    const { data, error } = await sb
+    const { error } = await sb
       .from(remoteTbl)
-      .upsert(rowWithoutId, { onConflict: 'local_id,user_id', ignoreDuplicates: false })
-      .select('id').single();
+      .update(row)
+      .eq('id', record.remote_id)
+      .eq('user_id', userId);
 
     if (error) throw error;
+    return;
+  }
 
-    // Сохраняем remote_id — критично для корректного merge при следующем pull
-    if (data?.id) {
-      await db[op.table]?.update(parseInt(op.recordId), { remote_id: data.id }).catch(() => {});
-    }
-  },
+  // 🧠 2. Если remote_id нет — ищем на сервере по local_id
+  const { data: existing } = await sb
+    .from(remoteTbl)
+    .select('id')
+    .eq('user_id', userId)
+    .eq('local_id', String(op.recordId))
+    .maybeSingle();
+
+  if (existing?.id) {
+    // 👉 нашли — сохраняем remote_id и обновляем
+    await db[op.table].update(parseInt(op.recordId), {
+      remote_id: existing.id
+    });
+
+    const row = toRemote(op.table, record, userId);
+
+    const { error } = await sb
+      .from(remoteTbl)
+      .update(row)
+      .eq('id', existing.id);
+
+    if (error) throw error;
+    return;
+  }
+
+  // 🧠 3. Если вообще нет — создаём новую запись
+  const row = toRemote(op.table, record, userId);
+  const { id: _, ...insertRow } = row;
+
+  const { data, error } = await sb
+    .from(remoteTbl)
+    .insert(insertRow)
+    .select('id')
+    .single();
+
+  if (error) throw error;
+
+  if (data?.id) {
+    await db[op.table].update(parseInt(op.recordId), {
+      remote_id: data.id
+    });
+  }
+},
 
   // ── Pull ────────────────────────────────────────────────────────
   // Тянет все изменения с сервера (включая deleted_at) начиная с lastPullAt.
   // Применяет только если серверная версия новее локальной И нет pending изменений.
-  async pull() {
-    const userId = await this.userId();
-    if (!userId) return 0;
+  async pull(force = false) {
+  const userId = await this.userId();
+  if (!userId) return 0;
 
-    const sb       = getSupabase();
-    const meta     = await db.syncMeta.get('lastPullAt').catch(() => null);
-    const lastPull = meta?.value || '1970-01-01T00:00:00.000Z';
-    let   merged   = 0;
+  const sb = getSupabase();
+  let merged = 0;
 
-    for (const [localTbl, remoteTbl] of Object.entries(TABLE_MAP)) {
-      try {
-        const { data, error } = await sb
-          .from(remoteTbl).select('*')
-          .eq('user_id', userId)
-          .gt('updated_at', lastPull);
+  for (const [localTbl, remoteTbl] of Object.entries(TABLE_MAP)) {
+    const { data, error } = await sb
+      .from(remoteTbl)
+      .select('*')
+      .eq('user_id', userId);
 
-        if (error) throw error;
-        if (!data?.length) continue;
+    if (error) throw error;
+    if (!data?.length) continue;
 
-        for (const row of data) {
-          // Ищем локальную запись: сначала по remote_id, потом по local_id
-          let existing = null;
+    for (const row of data) {
+      let existing = null;
 
-          if (row.id) {
-            existing = await db[localTbl].where('remote_id').equals(row.id).first().catch(() => null);
-          }
+      // сначала ищем по remote_id
+      if (row.id) {
+        existing = await db[localTbl]
+          .where('remote_id')
+          .equals(row.id)
+          .first();
+      }
 
-          if (!existing && row.local_id) {
-            const numId = parseInt(row.local_id);
-            if (!isNaN(numId)) {
-              existing = await db[localTbl].get(numId).catch(() => null);
-              if (existing && !existing.remote_id) {
-                // Нашли по local_id — сразу фиксируем remote_id чтобы не дублировать
-                await db[localTbl].update(existing.id, { remote_id: row.id }).catch(() => {});
-                existing = { ...existing, remote_id: row.id };
-              }
-            }
-          }
+      // fallback — по local_id
+      if (!existing && row.local_id) {
+        existing = await db[localTbl]
+          .where('id')
+          .equals(parseInt(row.local_id))
+          .first();
+      }
 
-          const remoteTs = row.updated_at ? new Date(row.updated_at).getTime() : 0;
-          const localTs  = existing?._local_updated || existing?.date_added || 0;
+      const local = toLocal(localTbl, row, existing);
 
-          if (existing) {
-            // Серверная версия не новее — пропускаем
-            if (remoteTs <= localTs) continue;
-
-            // Есть pending изменения от пользователя — не перезаписываем
-            const hasPending = await db.syncQueue
-              .where('[table+operation+recordId]')
-              .equals([localTbl, 'upsert', String(existing.id)])
-              .first().catch(() => null);
-
-            if (hasPending) continue;
-
-            // Применяем серверную версию (включая deleted_at)
-            const localObj = toLocal(localTbl, row, existing);
-            await db[localTbl].update(existing.id, { ...localObj, id: existing.id });
-            merged++;
-
-          } else {
-            // Новая запись с другого устройства
-            const localObj = toLocal(localTbl, row, null);
-            await db[localTbl].add(localObj).catch(() => {
-              // Если add упал (например нарушение уникальности) — молча пропускаем
-            });
-            merged++;
-          }
+      if (existing) {
+        // 🧠 обновляем только если сервер новее
+        const remoteTs = new Date(row.updated_at).getTime();
+        if ((existing._local_updated || 0) <= remoteTs) {
+          await db[localTbl].update(existing.id, local);
+          merged++;
         }
-
-      } catch (e) {
-        console.warn(`[Sync] Pull failed [${localTbl}]:`, e.message);
+      } else {
+        await db[localTbl].add(local);
+        merged++;
       }
     }
+  }
 
-    // Settings pull
-    try {
-      const { data } = await sb
-        .from('settings').select('weights')
-        .eq('user_id', userId).maybeSingle();
-      if (data?.weights) {
-        const parsed = typeof data.weights === 'object' ? data.weights : JSON.parse(data.weights);
-        await db.settings.put({ key: 'weights', value: parsed });
-        Settings.invalidate();
-      }
-    } catch {}
+  await db.syncMeta.put({
+    key: 'lastPullAt',
+    value: new Date().toISOString()
+  });
 
-    await db.syncMeta.put({ key: 'lastPullAt', value: new Date().toISOString() });
-    return merged;
-  },
+  return merged;
+},
 
   // ── GC ──────────────────────────────────────────────────────────
   // Физически удаляет soft-deleted записи старше GC_TTL_DAYS.
