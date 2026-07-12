@@ -258,11 +258,12 @@ async getAll() {
   },
 
 async update(id, data) {
-  const oldModel = await db.models.get(id);
+  const numericId = typeof id === 'string' ? parseInt(id, 10) : id;
+  const oldModel = await db.models.get(numericId);
 
   if (!oldModel) throw new Error('Model not found');
 
-  await checkDuplicate(data.name, data.aliases, id);
+  await checkDuplicate(data.name, data.aliases, numericId);
 
   // 🧠 1. MERGE ДАННЫХ (ключевой фикс)
   const merged = {
@@ -302,22 +303,25 @@ async update(id, data) {
   const scores = await computeModelScores(merged);
 
   // 🧠 7. обновление
-  await db.models.update(id, {
+  const updateData = {
     ...merged,
     name: merged.name.trim(),
     age: calcAge(merged.date_of_birth),
     overall: scores.overall,
     potential: scores.potential,
     _local_updated: Date.now(),
-  });
+  };
+  delete updateData.id;
+
+  await db.models.update(numericId, updateData);
 
   // 🧠 8. sync
   if (window.SyncManager) {
-    await SyncManager.enqueue('models', 'upsert', id);
+    await SyncManager.enqueue('models', 'upsert', numericId);
     if (navigator.onLine) SyncManager.flush();
   }
 
-  return id;
+  return numericId;
 },
 
   async delete(id) {

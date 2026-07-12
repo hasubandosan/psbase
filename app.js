@@ -147,10 +147,28 @@ function openCropper(src, onDone, aspectRatio=NaN) {
     </div>`;
   document.body.appendChild(div);
   let cropper=null;
-  requestAnimationFrame(()=>{
-    const img=div.querySelector('#crop-img');
-    if (window.Cropper) cropper=new Cropper(img,{aspectRatio,viewMode:1,autoCropArea:0.9,movable:true,zoomable:true,background:false,guides:true});
-  });
+
+  const img = div.querySelector('#crop-img');
+  const initCropper = () => {
+    if (window.Cropper && !cropper) {
+      cropper = new Cropper(img, {
+        aspectRatio,
+        viewMode: 1,
+        autoCropArea: 0.9,
+        movable: true,
+        zoomable: true,
+        background: false,
+        guides: true
+      });
+    }
+  };
+
+  if (img.complete) {
+    initCropper();
+  } else {
+    img.onload = initCropper;
+  }
+
   div.querySelector('#crop-cancel').onclick = ()=>div.remove();
   div.querySelector('#crop-ok').onclick = async ()=>{
     if (cropper) {
@@ -656,10 +674,12 @@ async function renderAddEdit(id) {
         <div class="sr-photo-wrap">
           <div class="sr-photo" id="srp-${part}">
             <input type="file" accept="image/*" class="bpp-file sr-file-inp" data-part="${part}">
-            <button type="button" class="bpp-url-btn" onclick="promptPhotoUrl('bpp','${part}')" title="Вставить URL">🔗</button>
             ${photoSrc?`<img src="${photoSrc}" alt="${BPL[part]}" onclick="viewImg('${photo}')">`:`<div class="bph">📷</div>`}
           </div>
-          ${photo?`<button class="bpart-crop-btn sr-crop-btn" onclick="cropBpp('${part}')">✂</button>`:''}
+          <div class="sr-photo-actions">
+            <button type="button" class="sr-photo-action-btn url-btn" onclick="promptPhotoUrl('bpp','${part}')" title="Вставить URL">🔗</button>
+            ${photo?`<button type="button" class="sr-photo-action-btn crop-btn" onclick="cropBpp('${part}')" title="Обрезать">✂</button>`:''}
+          </div>
         </div>
         <div class="sr-controls">
           <div class="rating-section-header">
@@ -685,14 +705,16 @@ async function renderAddEdit(id) {
       <div class="photo-wrap" id="main-photo-wrap">
         <div class="photo-upload" id="main-upload">
           <input type="file" id="main-file" accept="image/*">
-          <button type="button" class="btn btn-ghost photo-url-btn" onclick="promptPhotoUrl('main')" style="height:32px;padding:0 10px;font-size:12px;margin-bottom:6px">🔗 Вставить URL</button>
           <div class="photo-upload-box" id="main-box">
             ${m?.main_photo
               ?`<img class="photo-preview" id="main-img" src="${window.ImageKit?ImageKit.card(m.main_photo):m.main_photo}">`
               :`<div class="photo-ph"><div class="ph-icon">📷</div><div class="ph-txt">Нажмите для выбора</div></div>`}
           </div>
         </div>
-        ${m?.main_photo?`<button class="photo-crop-btn" onclick="cropMain()">✂ Кадрировать</button>`:''}
+        <div class="main-photo-actions">
+          <button type="button" class="main-action-btn url-btn" onclick="promptPhotoUrl('main')" title="Вставить URL">🔗</button>
+          ${m?.main_photo?`<button type="button" class="main-action-btn crop-btn" onclick="cropMain()" title="Кадрировать">✂</button>`:''}
+        </div>
       </div>
     </div>
     <div class="form-section">
@@ -754,8 +776,8 @@ async function renderAddEdit(id) {
   liveCalcPreview();
 
   // Если пришли из кастинга — устанавливаем имя и фото
-  if (!id && State._castingPrefill?.photo) {
-    setMainPhoto(State._castingPrefill.photo);
+  if (!id && prefill?.photo) {
+    setMainPhoto(prefill.photo);
   }
 
   // Main photo input
@@ -892,7 +914,21 @@ function setMainPhoto(src) {
   const box=document.getElementById('main-box');
   if(box) box.innerHTML=`<img class="photo-preview" id="main-img" src="${src}">`;
   const wrap=document.getElementById('main-photo-wrap');
-  if(wrap&&!wrap.querySelector('.photo-crop-btn')){ const btn=document.createElement('button'); btn.className='photo-crop-btn'; btn.textContent='✂ Кадрировать'; btn.onclick=cropMain; wrap.appendChild(btn); }
+  if(wrap){
+    const act=wrap.querySelector('.main-photo-actions');
+    if(act){
+      let cb=act.querySelector('.crop-btn');
+      if(!cb){
+        cb=document.createElement('button');
+        cb.type='button';
+        cb.className='main-action-btn crop-btn';
+        cb.textContent='✂';
+        cb.title='Кадрировать';
+        act.appendChild(cb);
+      }
+      cb.onclick=cropMain;
+    }
+  }
 }
 function cropMain() { const img=document.getElementById('main-img'); if(!img) return; openCropper(img.src,src=>setMainPhoto(src)); }
 function setBppPhoto(part,src) {
@@ -901,7 +937,21 @@ function setBppPhoto(part,src) {
   if(existing){existing.src=src;existing.onclick=()=>viewImg(src);}
   else{const bph=srp.querySelector('.bph');if(bph)bph.remove();const img=document.createElement('img');img.src=src;img.alt=part;img.onclick=()=>viewImg(src);srp.appendChild(img);}
   const wrap=srp.parentElement;
-  if(wrap){let cb=wrap.querySelector('.sr-crop-btn');if(!cb){cb=document.createElement('button');cb.className='bpart-crop-btn sr-crop-btn';cb.textContent='✂';wrap.appendChild(cb);}cb.onclick=()=>cropBpp(part);}
+  if(wrap){
+    const act=wrap.querySelector('.sr-photo-actions');
+    if(act){
+      let cb=act.querySelector('.crop-btn');
+      if(!cb){
+        cb=document.createElement('button');
+        cb.type='button';
+        cb.className='sr-photo-action-btn crop-btn';
+        cb.textContent='✂';
+        cb.title='Обрезать';
+        act.appendChild(cb);
+      }
+      cb.onclick=()=>cropBpp(part);
+    }
+  }
 }
 function cropBpp(part) { const srp=document.getElementById(`srp-${part}`); if(!srp) return; const img=srp.querySelector('img'); if(!img) return; openCropper(img.src,src=>setBppPhoto(part,src),1); }
 

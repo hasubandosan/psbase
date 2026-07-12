@@ -357,21 +357,65 @@ body::after {
 .rl-btn.sel-top .rl-val { color: var(--gold-light); }
 .rl-btn:active { transform: scale(0.96); }
 
-.bpp-url-btn {
+.sr-photo-actions {
   position: absolute;
-  bottom: 4px;
-  right: 4px;
-  background: rgba(0,0,0,0.6);
-  border: none;
-  border-radius: 6px;
-  color: #fff;
-  font-size: 12px;
-  padding: 2px 6px;
-  cursor: pointer;
-  z-index: 2;
-  line-height: 1.6;
+  bottom: 2px;
+  right: 2px;
+  display: flex;
+  gap: 3px;
+  z-index: 3;
 }
-.bpp-url-btn:hover { background: rgba(0,0,0,0.85); }
+.sr-photo-action-btn {
+  background: rgba(0,0,0,0.65);
+  border: none;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 11px;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.sr-photo-action-btn:hover {
+  background: rgba(0,0,0,0.85);
+}
+.sr-photo-action-btn:active {
+  background: var(--accent);
+}
+
+.main-photo-actions {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  display: flex;
+  gap: 6px;
+  z-index: 10;
+}
+.main-action-btn {
+  background: rgba(0,0,0,0.7);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: var(--r-sm);
+  color: #fff;
+  font-size: 14px;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+.main-action-btn:hover {
+  background: rgba(124,52,116,0.85);
+  border-color: rgba(255,255,255,0.3);
+}
+.main-action-btn:active {
+  transform: scale(0.95);
+}
 
 /* ── Slider Rating ───────────────────────────── */
 .slider-rating .sr-row {
@@ -433,23 +477,7 @@ body::after {
         z-index: 1;
     }
 
-.slider-rating .sr-crop-btn {
-    position: absolute;
-    bottom: 2px;
-    right: 2px;
-    z-index: 3;
-    background: rgba(0,0,0,0.65);
-    border: none;
-    border-radius: 4px;
-    color: #fff;
-    font-size: 10px;
-    padding: 2px 5px;
-    cursor: pointer;
-}
-
-    .slider-rating .sr-crop-btn:active {
-        background: var(--accent);
-    }
+/* Combined actions inside .sr-photo-actions */
 
 .rate-slider {
   -webkit-appearance: none; appearance: none;
@@ -857,6 +885,7 @@ body::after {
   align-items: center; justify-content: center; padding: 16px; gap: 16px;
 }
 .crop-modal .crop-container {
+  position: relative;
   max-width: 480px; width: 100%; max-height: 65vh; overflow: hidden; border-radius: var(--radius);
 }
 .crop-modal img { max-width: 100%; display: block; }
