@@ -167,7 +167,9 @@ async function processPhotoForSave(dataUrlOrFile) {
   // Уже ImageKit URL — нормализуем, уберем параметры
   if (typeof dataUrlOrFile === 'string' && !dataUrlOrFile.startsWith('data:')) {
     // Уберем параметры трансформации, оставим чистый URL
-    const url = dataUrlOrFile.split('?')[0];
+    let url = dataUrlOrFile.split('?')[0];
+    // Если это рендер URL от Supabase Image Transform, возвращаем его в обычный публичный вид
+    url = url.replace('/storage/v1/render/image/public/', '/storage/v1/object/public/');
     return url;
   }
   // Если ImageKit сконфигурирован — пробуем загрузить

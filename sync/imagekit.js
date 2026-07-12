@@ -64,7 +64,9 @@ const ImageKit = {
   // ── Загрузка из dataURL (миграция старых base64) ──────────────
   async uploadDataUrl(dataUrl, baseName, folder = 'models') {
     if (!dataUrl || !dataUrl.startsWith('data:')) {
-      return dataUrl.split('?')[0];
+      let url = dataUrl.split('?')[0];
+      url = url.replace('/storage/v1/render/image/public/', '/storage/v1/object/public/');
+      return url;
     }
     try {
       const blob = await this.compressFromDataUrl(dataUrl);
