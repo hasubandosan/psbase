@@ -12,6 +12,7 @@ const CONFIG = {
         thumbWidth: 200,      // Делаем превью поменьше
         cardWidth: 500,       // Оптимально для карточек
         bppWidth: 300,
+        useTransform: false,  // false — прямой URL /object/public/ (бесплатно). true — /render/image/public/ (Team $25/мес)
     }
 };
     

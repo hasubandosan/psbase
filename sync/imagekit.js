@@ -1,6 +1,9 @@
 // sync/imagekit.js — Supabase Storage + CDN трансформации
 // Хранит фото в Supabase Storage bucket 'photos'
 // Зависит от: CONFIG, getSupabase()
+//
+// Image Transform Supabase (endpoint /render/image/public/) требует платного плана (Team $25/мес).
+// Если CONFIG.image.useTransform !== true — возвращаем прямой URL через /object/public/ (бесплатно).
 
 const ImageKit = {
 
@@ -40,7 +43,6 @@ const ImageKit = {
     const sb   = getSupabase();
     const ext  = 'webp';
     const safe = fileName.replace(/[^a-z0-9]/gi, '_').slice(0, 40);
-    // FIX: исправлен template literal
     const path = `${folder}/${Date.now()}_${safe}.${ext}`;
 
     const { error } = await sb.storage
@@ -70,7 +72,6 @@ const ImageKit = {
     }
     try {
       const blob = await this.compressFromDataUrl(dataUrl);
-      // FIX: исправлен template literal
       return await this.upload(blob, `${baseName}.webp`, folder);
     } catch (e) {
       console.warn('Storage upload failed, keeping local:', e.message);
@@ -78,17 +79,30 @@ const ImageKit = {
     }
   },
 
+  // ── Прямой public URL без Image Transform (бесплатный) ────────
+  // Используется если CONFIG.image.useTransform !== true
+  _direct(url) {
+    if (!url || url.startsWith('data:')) return url;
+    const clean = url.split('?')[0];
+    if (!clean.includes('/object/public/')) return clean;
+    return clean;
+  },
+
   // ── URL-трансформации через Supabase Image Transform ─────────
+  // Если флаг useTransform не включён — используем _direct (чистый URL)
+  // Image Transform требует платного плана Supabase (Team $25/мес)
   _tr(url, params) {
     if (!url || url.startsWith('data:')) return url;
     const clean = url.split('?')[0];
     if (!clean.includes('/object/public/')) return clean;
+
+    // Если трансформация отключена — отдаём прямой URL без параметров
+    if (!CONFIG.image.useTransform) return clean;
+
     const renderUrl = clean.replace('/storage/v1/object/public/', '/storage/v1/render/image/public/');
-    // FIX: исправлен template literal
     return `${renderUrl}?${params}&format=webp`;
   },
 
-  // FIX: исправлены template literals во всех методах трансформации
   thumb(url)  { return this._tr(url, `width=${CONFIG.image.thumbWidth}&quality=70`); },
   card(url)   { return this._tr(url, `width=${CONFIG.image.cardWidth}&quality=75`); },
   detail(url) { return this._tr(url, 'width=800&quality=80'); },
@@ -170,4 +184,3 @@ const ImageKit = {
 };
 
 window.ImageKit = ImageKit;
-
