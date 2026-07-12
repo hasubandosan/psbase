@@ -162,28 +162,43 @@ async function checkDuplicate(name, aliases, excludeId=null) {
 // ── Helpers ───────────────────────────────────────────────────────
 // Загружает файл как ImageKit URL (если авторизован и онлайн),
 // иначе возвращает DataURL как раньше — прозрачный fallback
-async function processPhotoForSave(dataUrlOrFile) {
+// Если фото уже является внешним URL (не data: и не Supabase Storage) — не загружаем повторно
+async function processPhotoForSave(dataUrlOrFile, source) {
   if (!dataUrlOrFile) return '';
-  // Уже ImageKit URL — нормализуем, уберем параметры
-  if (typeof dataUrlOrFile === 'string' && !dataUrlOrFile.startsWith('data:')) {
-    // Уберем параметры трансформации, оставим чистый URL
+  
+  // Уже строка (URL или dataURL)
+  if (typeof dataUrlOrFile === 'string') {
+    // Если это dataURL — нужно загрузить в Storage
+    if (dataUrlOrFile.startsWith('data:')) {
+      if (window.ImageKit && window.SyncManager && navigator.onLine) {
+        try {
+          return await ImageKit.uploadDataUrl(dataUrlOrFile, `photo-${Date.now()}`);
+        } catch(e) { console.warn('ImageKit upload failed, storing locally:', e.message); }
+      }
+      return dataUrlOrFile; // fallback
+    }
+    
+    // Уже URL — нормализуем
     let url = dataUrlOrFile.split('?')[0];
-    // Если это рендер URL от Supabase Image Transform, возвращаем его в обычный публичный вид
     url = url.replace('/storage/v1/render/image/public/', '/storage/v1/object/public/');
+    
+    // Если это внешний URL (не Supabase Storage) — не загружаем, сохраняем как есть
+    if (!url.includes('/storage/v1/object/public/')) {
+      return url;
+    }
+    
+    // Это Supabase Storage URL — уже загружено, возвращаем как есть
     return url;
   }
-  // Если ImageKit сконфигурирован — пробуем загрузить
+  
+  // Это File/Blob — загружаем в Storage
   if (window.ImageKit && window.SyncManager && navigator.onLine) {
     try {
-      if (typeof dataUrlOrFile === 'string') {
-        return await ImageKit.uploadDataUrl(dataUrlOrFile, `photo-${Date.now()}`);
-      } else {
-        const res = await ImageKit.uploadFile(dataUrlOrFile);
-        return res.url;
-      }
+      const res = await ImageKit.uploadFile(dataUrlOrFile);
+      return res.url;
     } catch(e) { console.warn('ImageKit upload failed, storing locally:', e.message); }
   }
-  return dataUrlOrFile; // fallback: DataURL в IndexedDB
+  return dataUrlOrFile; // fallback
 }
 
 function normalizeModel(m) {
@@ -240,7 +255,7 @@ async getAll() {
     const localId = await db.models.add({
       ...data,
       name:             data.name.trim(),
-      age:              calcAge(data.date_of_birth),
+      age:              data.date_of_death ? calcAgeAtDeath(data.date_of_birth, data.date_of_death) : calcAge(data.date_of_birth),
       overall:          scores.overall,
       potential:        scores.potential,
       drops:            data.drops       || 0,
@@ -308,7 +323,7 @@ async update(id, data) {
   const updateData = {
     ...merged,
     name: merged.name.trim(),
-    age: calcAge(merged.date_of_birth),
+    age: merged.date_of_death ? calcAgeAtDeath(merged.date_of_birth, merged.date_of_death) : calcAge(merged.date_of_birth),
     overall: scores.overall,
     potential: scores.potential,
     _local_updated: Date.now(),
@@ -368,7 +383,7 @@ async update(id, data) {
     const all = await db.models.toArray();
     for (const m of all) {
       const s = await computeModelScores(m);
-      await db.models.update(m.id,{...s,age:calcAge(m.date_of_birth)});
+      await db.models.update(m.id,{...s,age: m.date_of_death ? calcAgeAtDeath(m.date_of_birth, m.date_of_death) : calcAge(m.date_of_birth)});
     }
   },
 

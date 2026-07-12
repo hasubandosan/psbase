@@ -143,6 +143,7 @@ function openCropper(src, onDone, aspectRatio=NaN) {
   div.innerHTML = `<div class="crop-container"><img id="crop-img" src="${src}" style="max-width:100%;display:block"></div>
     <div class="crop-actions">
       <button class="btn btn-ghost" id="crop-cancel">Отмена</button>
+      <button class="btn btn-ghost" id="crop-skip">Продолжить без изменений</button>
       <button class="btn btn-gold" id="crop-ok">✂ Обрезать</button>
     </div>`;
   document.body.appendChild(div);
@@ -154,7 +155,7 @@ function openCropper(src, onDone, aspectRatio=NaN) {
       cropper = new Cropper(img, {
         aspectRatio,
         viewMode: 1,
-        autoCropArea: 0.9,
+        autoCropArea: 1.0, // full frame по умолчанию
         movable: true,
         zoomable: true,
         background: false,
@@ -170,14 +171,23 @@ function openCropper(src, onDone, aspectRatio=NaN) {
   }
 
   div.querySelector('#crop-cancel').onclick = ()=>div.remove();
+  
+  // "Продолжить без изменений" — используем фото как есть, не загружаем в Storage
+  div.querySelector('#crop-skip').onclick = async ()=>{
+    if (cropper) cropper.destroy();
+    div.remove();
+    onDone(src); // передаём исходный URL без изменений
+  };
+  
   div.querySelector('#crop-ok').onclick = async ()=>{
     if (cropper) {
       const canvas = cropper.getCroppedCanvas({maxWidth:800,maxHeight:1200});
       cropper.destroy();
       // DataURL → file → upload
       canvas.toBlob(async blob => {
+        // Обрезанная версия — новый файл, помечаем как 'upload'
         const url = await handlePhotoFile(new File([blob], 'crop.webp', {type:'image/webp'}));
-        onDone(url);
+        onDone(url, 'upload');
       }, 'image/webp', 0.85);
     }
     div.remove();
@@ -462,10 +472,22 @@ function modelCard(m, s30O, s30P) {
   const oCls=inTop30O?'rank-gold':scoreValueClass(m.overall);
   const pCls=inTop30P?'rank-gold':scoreValueClass(m.potential);
   const photoSrc = window.ImageKit ? ImageKit.thumb(m.main_photo) : m.main_photo;
+  
+  // Определяем badge источника фото
+  let sourceBadge = '';
+  if (m.main_photo) {
+    if (m.main_photo.startsWith('http') && !m.main_photo.includes('/storage/v1/object/public/')) {
+      sourceBadge = `<span class="photo-source-badge url" style="top:8px;left:8px">🔗 URL</span>`;
+    } else {
+      sourceBadge = `<span class="photo-source-badge upload" style="top:8px;left:8px">📦 Бакет</span>`;
+    }
+  }
+
   const el=document.createElement('div');
   el.className=`model-card${m.is_favorite?' is-favorite':''}${inTop30O?' card-top30':''}`;
   el.innerHTML=`
-    <div class="model-card-photo">
+    <div class="model-card-photo" style="position:relative">
+      ${sourceBadge}
       ${photoSrc?`<img src="${photoSrc}" alt="${escHtml(m.name)}" loading="lazy">`:`<div class="ph">👤</div>`}
     </div>
     <div class="model-card-body">
@@ -541,7 +563,7 @@ async function renderDetail(id) {
       <div class="detail-hero-overlay">
         <div class="detail-name">${escHtml(m.name)}</div>
         ${m.aliases?`<div class="aliases-text">${escHtml(m.aliases)}</div>`:''}
-        <div class="detail-sub">${[escHtml(m.country||''),m.age!=null?m.age+' лет':''].filter(Boolean).join(' · ')}</div>
+        <div class="detail-sub">${[escHtml(m.country||''),m.age!=null?(m.date_of_death?'умерла в '+m.age+' лет':m.age+' лет'):''].filter(Boolean).join(' · ')}</div>
         ${m.date_of_death?`<div class="deceased-badge">✝ ${m.date_of_death}</div>`:''}
         <div class="detail-scores-row">
           <div class="ds overall"><span class="dl">Overall</span><span class="dv">${m.overall||0}</span></div>
@@ -566,7 +588,7 @@ async function renderDetail(id) {
       ${tags.length?`<div class="tags-display">${tags.map(t=>`<span class="tag-pill">${escHtml(t.icon||'')} ${escHtml(t.name)}</span>`).join('')}</div>`:''}
       <div class="info-grid">
         ${m.date_of_birth?`<div class="info-cell"><div class="ic-l">Дата рождения</div><div class="ic-v">${m.date_of_birth}</div></div>`:''}
-        ${m.age!=null?`<div class="info-cell"><div class="ic-l">Возраст</div><div class="ic-v">${m.age} лет</div></div>`:''}
+        ${m.age!=null?`<div class="info-cell"><div class="ic-l">${m.date_of_death?'Возраст на момент смерти':'Возраст'}</div><div class="ic-v">${m.age} лет</div></div>`:''}
         ${m.height?`<div class="info-cell"><div class="ic-l">Рост</div><div class="ic-v">${m.height} см</div></div>`:''}
         ${m.weight?`<div class="info-cell"><div class="ic-l">Вес</div><div class="ic-v">${m.weight} кг</div></div>`:''}
         ${m.shoulder_size?`<div class="info-cell"><div class="ic-l">Плечи</div><div class="ic-v">${m.shoulder_size}</div></div>`:''}
@@ -780,22 +802,42 @@ async function renderAddEdit(id) {
     setMainPhoto(prefill.photo);
   }
 
-  // Main photo input
+  // Main photo input — сначала crop, потом загрузка
   document.getElementById('main-file').addEventListener('change', async e=>{
     const file=e.target.files[0]; if(!file) return;
     const btn=document.getElementById('save-btn');
     if(btn) { btn.disabled=true; btn.textContent='⏳ Загрузка...'; }
-    const url = await handlePhotoFile(file);
-    setMainPhoto(url);
-    if(btn) { btn.disabled=false; btn.textContent=isEdit?'💾 Сохранить':'✦ Добавить модель'; }
+    // Показываем превью локально для crop
+    const dataUrl = await fileToDataUrl(file);
+    openCropper(dataUrl, async (croppedSrc, source) => {
+      if (source === 'upload') {
+        // Была обрезка — уже загружено в Storage внутри openCropper
+        setMainPhoto(croppedSrc, 'upload');
+      } else {
+        // Продолжить без изменений — загружаем оригинал
+        const url = await handlePhotoFile(file);
+        setMainPhoto(url, 'upload');
+      }
+      if(btn) { btn.disabled=false; btn.textContent=isEdit?'💾 Сохранить':'✦ Добавить модель'; }
+    });
   });
 
-  // Body part file inputs
+  // Body part file inputs — сначала crop, потом загрузка
   v.querySelectorAll('.sr-file-inp').forEach(inp=>{
     inp.addEventListener('change', async e=>{
       const part=e.target.dataset.part, file=e.target.files[0]; if(!file) return;
-      const url = await handlePhotoFile(file);
-      setBppPhoto(part,url);
+      // Показываем превью локально для crop
+      const dataUrl = await fileToDataUrl(file);
+      openCropper(dataUrl, async (croppedSrc, source) => {
+        if (source === 'upload') {
+          // Была обрезка — уже загружено в Storage внутри openCropper
+          setBppPhoto(part, croppedSrc, 'upload');
+        } else {
+          // Продолжить без изменений — загружаем оригинал
+          const url = await handlePhotoFile(file);
+          setBppPhoto(part, url, 'upload');
+        }
+      }, 1); // 1:1 aspect ratio для частей тела
     });
   });
 
@@ -894,10 +936,25 @@ function promptPhotoUrl(target, part) {
     const url = inp.value.trim();
     if (!url) return;
     ov.remove();
+    // Показываем crop окно с загруженным по URL изображением
     if (target === 'main') {
-      setMainPhoto(url);
+      openCropper(url, (croppedSrc, source) => {
+        if (source === 'upload') {
+          // Была обрезка — используем обрезанную версию (уже в Storage)
+          setMainPhoto(croppedSrc, 'upload');
+        } else {
+          // Продолжить без изменений — используем URL как есть
+          setMainPhoto(url, 'url');
+        }
+      });
     } else if (target === 'bpp' && part) {
-      setBppPhoto(part, url);
+      openCropper(url, (croppedSrc, source) => {
+        if (source === 'upload') {
+          setBppPhoto(part, croppedSrc, 'upload');
+        } else {
+          setBppPhoto(part, url, 'url');
+        }
+      }, 1);
     } else if (target === 'extra') {
       _formExtra.push(url);
       refreshExtraStrip();
@@ -910,9 +967,72 @@ function promptPhotoUrl(target, part) {
   setTimeout(() => inp.focus(), 50);
 }
 
-function setMainPhoto(src) {
+// ── Photo source tracking ────────────────────────────────────────
+// Храним источник фото в State._photoMeta
+// { main_photo: 'url'|'upload'|'', body_part_photos: {face:'url',...}, extra_photos: ['url',...] }
+State._photoMeta = null;
+
+function _getPhotoMeta() {
+  if (!State._photoMeta) State._photoMeta = { main_photo: '', body_part_photos: {}, extra_photos: [] };
+  return State._photoMeta;
+}
+
+function _setPhotoSource(target, source, part) {
+  const meta = _getPhotoMeta();
+  if (target === 'main') {
+    meta.main_photo = source;
+  } else if (target === 'bpp' && part) {
+    meta.body_part_photos[part] = source;
+  } else if (target === 'extra') {
+    meta.extra_photos.push(source);
+  }
+}
+
+function _updatePhotoSourceBadge(target, part) {
+  const meta = _getPhotoMeta();
+  let source = '';
+  if (target === 'main') source = meta.main_photo;
+  else if (target === 'bpp' && part) source = meta.body_part_photos[part] || '';
+
+  // Ищем существующий badge или создаём
+  const container = target === 'main' 
+    ? document.getElementById('main-photo-wrap')
+    : document.querySelector(`#srp-${part}`)?.parentElement;
+  if (!container) return;
+
+  let badge = container.querySelector('.photo-source-badge');
+  if (!badge) {
+    badge = document.createElement('span');
+    badge.className = 'photo-source-badge';
+    container.style.position = 'relative';
+    container.appendChild(badge);
+  }
+
+  if (source === 'url') {
+    badge.textContent = '🔗 URL';
+    badge.style.cssText = 'position:absolute;top:6px;left:6px;z-index:10;font-size:10px;background:rgba(0,0,0,0.7);color:#8cf;padding:2px 6px;border-radius:4px;border:1px solid rgba(136,192,255,0.3);pointer-events:none';
+  } else if (source === 'upload') {
+    badge.textContent = '📦 Бакет';
+    badge.style.cssText = 'position:absolute;top:6px;left:6px;z-index:10;font-size:10px;background:rgba(0,0,0,0.7);color:#8c8;padding:2px 6px;border-radius:4px;border:1px solid rgba(136,200,136,0.3);pointer-events:none';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+function setMainPhoto(src, source) {
   const box=document.getElementById('main-box');
   if(box) box.innerHTML=`<img class="photo-preview" id="main-img" src="${src}">`;
+  if (source) _setPhotoSource('main', source);
+  else {
+    // Определяем источник автоматически
+    const meta = _getPhotoMeta();
+    if (src.startsWith('http') && !src.includes('/storage/v1/object/public/')) {
+      meta.main_photo = 'url';
+    } else if (src && src !== '') {
+      meta.main_photo = 'upload';
+    }
+  }
+  _updatePhotoSourceBadge('main');
   const wrap=document.getElementById('main-photo-wrap');
   if(wrap){
     const act=wrap.querySelector('.main-photo-actions');
@@ -930,12 +1050,22 @@ function setMainPhoto(src) {
     }
   }
 }
-function cropMain() { const img=document.getElementById('main-img'); if(!img) return; openCropper(img.src,src=>setMainPhoto(src)); }
-function setBppPhoto(part,src) {
+function cropMain() { const img=document.getElementById('main-img'); if(!img) return; openCropper(img.src,src=>setMainPhoto(src,'upload')); }
+function setBppPhoto(part,src, source) {
   const srp=document.getElementById(`srp-${part}`); if(!srp) return;
   const existing=srp.querySelector('img');
   if(existing){existing.src=src;existing.onclick=()=>viewImg(src);}
   else{const bph=srp.querySelector('.bph');if(bph)bph.remove();const img=document.createElement('img');img.src=src;img.alt=part;img.onclick=()=>viewImg(src);srp.appendChild(img);}
+  if (source) _setPhotoSource('bpp', source, part);
+  else {
+    const meta = _getPhotoMeta();
+    if (src.startsWith('http') && !src.includes('/storage/v1/object/public/')) {
+      meta.body_part_photos[part] = 'url';
+    } else if (src && src !== '') {
+      meta.body_part_photos[part] = 'upload';
+    }
+  }
+  _updatePhotoSourceBadge('bpp', part);
   const wrap=srp.parentElement;
   if(wrap){
     const act=wrap.querySelector('.sr-photo-actions');
@@ -953,7 +1083,7 @@ function setBppPhoto(part,src) {
     }
   }
 }
-function cropBpp(part) { const srp=document.getElementById(`srp-${part}`); if(!srp) return; const img=srp.querySelector('img'); if(!img) return; openCropper(img.src,src=>setBppPhoto(part,src),1); }
+function cropBpp(part) { const srp=document.getElementById(`srp-${part}`); if(!srp) return; const img=srp.querySelector('img'); if(!img) return; openCropper(img.src,src=>setBppPhoto(part,src,'upload'),1); }
 
 function slideRate(input,part) {
   const val=parseFloat(input.value), disp=document.getElementById('rv-'+part);
