@@ -351,7 +351,9 @@ const SyncManager = {
   }
 
   if (record.remote_id) {
-    const row = toRemote(op.table, record, userId);
+    const { local_id: _li, ...row } = toRemote(op.table, record, userId);
+    // local_id не включаем при обновлении — она задаётся только при создании
+    // иначе конфликт unique-индекса models_local_user
 
     const { error } = await sb
       .from(remoteTbl)
