@@ -1,7 +1,7 @@
 // PSBase Service Worker v2 — раздельный кэш для app и изображений
 'use strict';
 
-const APP_CACHE = 'psbase-app-v5';
+const APP_CACHE = 'psbase-app-v6';
 const IMG_CACHE = 'psbase-img-v1';
 
 // Файлы приложения — кэшируем при установке

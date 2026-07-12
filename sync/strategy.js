@@ -390,7 +390,9 @@ const SyncManager = {
 
   // 🧠 3. Если вообще нет — создаём новую запись
   const row = toRemote(op.table, record, userId);
-  const { id: _, ...insertRow } = row;
+  const { id: _, local_id: _li, ...insertRow } = row;
+  // local_id не включаем — избегаем unique constraint конфликта между устройствами.
+  // Проставляем отдельным PATCH после создания.
 
   const { data, error } = await sb
     .from(remoteTbl)
@@ -398,12 +400,36 @@ const SyncManager = {
     .select('id')
     .single();
 
-  if (error) throw error;
+  if (error) {
+    // 🧠 3a. При duplicate key — upsert: находим запись по local_id и обновляем
+    if (error.code === '23505' && row.local_id) {
+      const { data: dup } = await sb
+        .from(remoteTbl)
+        .select('id')
+        .eq('user_id', userId)
+        .eq('local_id', row.local_id)
+        .maybeSingle();
+
+      if (dup?.id) {
+        await db[op.table].update(parseInt(op.recordId), { remote_id: dup.id });
+        const updRow = { ...row };
+        delete updRow.id;
+        await sb.from(remoteTbl).update(updRow).eq('id', dup.id);
+        return;
+      }
+    }
+    throw error;
+  }
 
   if (data?.id) {
     await db[op.table].update(parseInt(op.recordId), {
       remote_id: data.id
     });
+  }
+
+  // Отдельно проставляем local_id (если не включили выше)
+  if (row.local_id) {
+    await sb.from(remoteTbl).update({ local_id: row.local_id }).eq('id', data.id);
   }
 },
 
