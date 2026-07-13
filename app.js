@@ -1390,6 +1390,7 @@ kwSection.innerHTML = `<div class="divider"></div>
   </div>`;
 
 document.getElementById('view-settings').appendChild(kwSection);
+}
 
 function saveCastingKwFromUI() {
   const kw = {};
@@ -1407,7 +1408,6 @@ function resetCastingKw() {
   });
   saveCastingKw({ ...DEFAULT_CASTING_KW });
   toast('Сброшено', 'info');
-}
 }
 
 async function doSignOut() {
