@@ -775,13 +775,12 @@ async function renderAddEdit(id) {
     </div>
     <div class="form-section">
       <div class="form-section-title">✦ Основная информация</div>
-      <div class="form-group">
-  <label class="form-label">Имя *</label>
-  <div style="display:flex;gap:8px">
-    <input class="form-input" id="f-name" style="flex:1" value="${escHtml(m?.name||prefill?.name||'')}" placeholder="Имя или псевдоним">
-    <button type="button" class="btn btn-gold" id="autofill-btn" style="flex-shrink:0;height:44px;padding:0 14px;white-space:nowrap" onclick="autoFillModel()">✦ Авто-заполнение</button>
-  </div>
-</div>
+      <div class="form-group"><label class="form-label">Имя *</label>
+        <div style="display:flex;gap:8px">
+          <input class="form-input" id="f-name" style="flex:1" value="${escHtml(m?.name||prefill?.name||'')}" placeholder="Имя или псевдоним">
+          <button type="button" class="btn btn-gold" id="autofill-btn" style="flex-shrink:0;height:44px;padding:0 14px;white-space:nowrap" onclick="autoFillModel()">✦ Авто-заполнение</button>
+        </div>
+      </div>
       <div class="form-group"><label class="form-label">Псевдонимы (через запятую)</label><input class="form-input" id="f-aliases" value="${escHtml(m?.aliases||'')}" placeholder="Псевдоним 1, Псевдоним 2"></div>
       <div class="form-group"><label class="form-label">Страна</label>
         <select class="form-input" id="f-country">
@@ -1158,6 +1157,181 @@ async function collectRatings() {
   return out;
 }
 
+// ── Auto-fill (Gemini) ──────────────────────────────────────────────
+const GEMINI_MODEL = 'gemini-2.0-flash';
+
+function normalizeForMatch(s) {
+  return String(s||'').toLowerCase().replace(/[^\p{L}\p{N}]+/gu,'').trim();
+}
+
+function matchCountry(name) {
+  if (!name) return '';
+  const n = normalizeForMatch(name);
+  if (!n) return '';
+  let found = COUNTRIES.find(c => normalizeForMatch(c.name) === n);
+  if (!found) found = COUNTRIES.find(c => normalizeForMatch(c.name).includes(n) || n.includes(normalizeForMatch(c.name)));
+  return found ? found.name : '';
+}
+
+async function fetchGeminiModelData(name) {
+  const key = localStorage.getItem('psbase-gemini-key');
+  if (!key) throw new Error('NO_KEY');
+  const prompt = `Найди точные данные для модели/актрисы "${name}".
+Ответь ТОЛЬКО валидным JSON без markdown, строго в формате:
+{
+  "date_of_birth": "YYYY-MM-DD или null",
+  "date_of_death": "YYYY-MM-DD или null",
+  "country": "страна на русском или null",
+  "height": число_см_или_null,
+  "weight": число_кг_или_null,
+  "shoulder_size": "размер груди напр. 90C или null",
+  "tags": ["список","характеристик","внешности","и","жанров"],
+  "aliases": "псевдонимы через запятую или null",
+  "confidence": "high|medium|low"
+}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${key}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+  });
+  if (!res.ok) throw new Error('HTTP_' + res.status);
+  const data = await res.json();
+  let text = (data?.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
+  text = text.replace(/```json|```/g, '').trim();
+  let parsed;
+  try { parsed = JSON.parse(text); } catch (e) { throw new Error('BAD_JSON'); }
+  return parsed;
+}
+
+async function autoFillModel() {
+  const name = document.getElementById('f-name')?.value.trim();
+  if (!name) { toast('Сначала введите имя', 'error'); return; }
+  if (!localStorage.getItem('psbase-gemini-key')) {
+    toast('Укажите ключ Gemini API в Настройках', 'error');
+    return;
+  }
+  const btn = document.getElementById('autofill-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Ищу...'; }
+  try {
+    const result = await fetchGeminiModelData(name);
+    await openAutoFillModal(result);
+  } catch (e) {
+    if (e.message === 'NO_KEY') toast('Укажите ключ Gemini API в Настройках', 'error');
+    else if (e.message === 'BAD_JSON') toast('Не удалось разобрать ответ Gemini', 'error');
+    else toast('Ошибка запроса: ' + e.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '✦ Авто-заполнение'; }
+  }
+}
+
+// Пересобирает секцию тегов формы (после создания новых тегов), сохраняя текущий выбор
+async function refreshTagsSection(selectExtraId) {
+  const container = document.getElementById('tags-form-section');
+  if (!container) return;
+  const prevSelected = new Set([...document.querySelectorAll('#tags-form-section .tag-opt.selected')].map(el => parseInt(el.dataset.id)));
+  if (selectExtraId != null) prevSelected.add(selectExtraId);
+  const allTagsNow = await Tags.getAll();
+  container.innerHTML = `<div class="form-section-title">🏷️ Теги</div>
+    ${allTagsNow.length
+      ? `<div class="tags-selector" id="tags-sel">
+          ${allTagsNow.map(t=>`<div class="tag-opt${prevSelected.has(t.id)?' selected':''}" data-id="${t.id}" data-weight="${t.weight||1}" onclick="this.classList.toggle('selected');liveCalcPreview()">${escHtml(t.icon||'')} ${escHtml(t.name)}</div>`).join('')}
+         </div>`
+      : `<span style="color:var(--text3);font-size:13px">Нет тегов. <a href="#" onclick="nav('tags')" style="color:var(--accent-light)">Создать теги</a></span>`}`;
+}
+
+async function openAutoFillModal(result) {
+  const allTags = await Tags.getAll();
+  const FIELD_LABELS = {
+    date_of_birth: 'Дата рождения', date_of_death: 'Дата смерти', country: 'Страна',
+    height: 'Рост (см)', weight: 'Вес (кг)', shoulder_size: 'Размер груди', aliases: 'Псевдонимы'
+  };
+  const scalarFields = Object.keys(FIELD_LABELS).filter(k => result[k] != null && result[k] !== '');
+
+  // Fuzzy-match тегов из ответа с существующими тегами базы
+  const matchedTags = []; // {tagId, label}
+  const newTagNames = [];
+  (result.tags || []).forEach(tName => {
+    const nm = normalizeForMatch(tName);
+    if (!nm) return;
+    let found = allTags.find(t => normalizeForMatch(t.name) === nm);
+    if (!found) found = allTags.find(t => normalizeForMatch(t.name).includes(nm) || nm.includes(normalizeForMatch(t.name)));
+    if (found && !matchedTags.some(m => m.tagId === found.id)) matchedTags.push({ tagId: found.id, label: `${found.icon || '🏷️'} ${found.name}` });
+    else if (!found) newTagNames.push(String(tName).trim());
+  });
+
+  const countryMatch = result.country ? matchCountry(result.country) : '';
+  const confidenceLabel = result.confidence === 'low' ? '⚠️ низкая точность'
+    : result.confidence === 'medium' ? 'средняя точность' : 'высокая точность';
+
+  const row = (attr, label, value) => `
+    <label class="autofill-row" style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border,#2a2a2a)">
+      <input type="checkbox" checked ${attr} style="width:18px;height:18px;flex-shrink:0">
+      <span style="flex:1;font-size:13px;color:var(--text2)">${label}</span>
+      <span style="font-size:13px;font-weight:600;text-align:right;max-width:55%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(String(value))}</span>
+    </label>`;
+
+  let html = `<div class="modal-title">✦ Авто-заполнение — ${confidenceLabel}</div>
+    <div style="max-height:60vh;overflow-y:auto;margin-top:8px">`;
+
+  if (!scalarFields.length && !matchedTags.length && !newTagNames.length) {
+    html += `<p style="color:var(--text3);font-size:13px">Gemini не нашёл данных по этому имени.</p>`;
+  }
+
+  scalarFields.forEach(key => {
+    const displayVal = key === 'country' ? (countryMatch || result.country + ' (нет в списке стран)') : result[key];
+    html += row(`data-field="${key}"`, FIELD_LABELS[key], displayVal);
+  });
+
+  if (matchedTags.length) {
+    html += `<div style="font-size:12px;color:var(--text3);margin:10px 0 4px">Совпавшие теги</div>`;
+    matchedTags.forEach(t => { html += row(`data-tag-existing="${t.tagId}"`, escHtml(t.label), ''); });
+  }
+  if (newTagNames.length) {
+    html += `<div style="font-size:12px;color:var(--text3);margin:10px 0 4px">Новые теги (будут созданы)</div>`;
+    newTagNames.forEach(t => { html += row(`data-tag-new="${escHtml(t)}"`, `✨ ${escHtml(t)}`, ''); });
+  }
+
+  html += `</div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" data-cancel>Отмена</button>
+      <button class="btn btn-gold" data-ok>Заполнить</button>
+    </div>`;
+
+  modal(html, async (ov) => {
+    scalarFields.forEach(key => {
+      const cb = ov.querySelector(`[data-field="${key}"]`);
+      if (!cb?.checked) return;
+      if (key === 'date_of_birth') document.getElementById('f-dob').value = result.date_of_birth;
+      else if (key === 'date_of_death') document.getElementById('f-dod').value = result.date_of_death;
+      else if (key === 'country') { if (countryMatch) document.getElementById('f-country').value = countryMatch; }
+      else if (key === 'height') document.getElementById('f-height').value = result.height;
+      else if (key === 'weight') document.getElementById('f-weight').value = result.weight;
+      else if (key === 'shoulder_size') document.getElementById('f-sh').value = result.shoulder_size;
+      else if (key === 'aliases') document.getElementById('f-aliases').value = result.aliases;
+    });
+
+    ov.querySelectorAll('[data-tag-existing]').forEach(cb => {
+      if (!cb.checked) return;
+      const id = parseInt(cb.dataset.tagExisting);
+      const el = document.querySelector(`#tags-form-section .tag-opt[data-id="${id}"]`);
+      if (el) el.classList.add('selected');
+    });
+
+    const newTagCbs = [...ov.querySelectorAll('[data-tag-new]')].filter(cb => cb.checked);
+    for (const cb of newTagCbs) {
+      const tName = cb.dataset.tagNew;
+      try {
+        const newId = await Tags.add({ icon: '🏷️', name: tName, weight: 1.0 });
+        await refreshTagsSection(newId);
+      } catch (e) { toast('Не удалось создать тег «' + tName + '»', 'error'); }
+    }
+
+    liveCalcPreview();
+    toast('Поля заполнены ✓', 'success');
+  });
+}
+
 async function saveModel(id) {
   const name=document.getElementById('f-name')?.value.trim();
   if(!name){toast('Введите имя','error');return;}
@@ -1359,20 +1533,18 @@ async function renderSettings() {
     </div>
     <div class="divider"></div>
     <div class="form-section">
-    <div class="form-section-title">✦ Gemini API (авто-заполнение)</div>
-<p style="color:var(--text3);font-size:12px;line-height:1.6;margin-bottom:12px">
-  Ключ используется кнопкой «✦ Авто-заполнение»...
-</p>
-<div class="form-group">
-  <input class="form-input" type="password" id="gemini-key-inp" placeholder="AIza..." value="${escHtml(localStorage.getItem('psbase-gemini-key')||'')}">
-</div>
-<div style="display:flex;gap:10px;margin-top:10px">
-  <button class="btn btn-ghost" style="flex:1;height:44px" onclick="clearGeminiKey()">✕ Очистить</button>
-  <button class="btn btn-gold" style="flex:2;height:44px" onclick="saveGeminiKey()">💾 Сохранить ключ</button>
-</div>
-</div>
-<div class="divider"></div>
-<div class="form-section">
+      <div class="form-section-title">✦ Gemini API (авто-заполнение)</div>
+      <p style="color:var(--text3);font-size:12px;line-height:1.6;margin-bottom:12px">Ключ используется кнопкой «✦ Авто-заполнение» в форме модели, чтобы находить дату рождения, страну, параметры и теги по имени. Хранится только локально на устройстве.</p>
+      <div class="form-group">
+        <input class="form-input" type="password" id="gemini-key-inp" placeholder="AIza..." value="${escHtml(localStorage.getItem('psbase-gemini-key')||'')}">
+      </div>
+      <div style="display:flex;gap:10px;margin-top:10px">
+        <button class="btn btn-ghost" style="flex:1;height:44px" onclick="clearGeminiKey()">✕ Очистить</button>
+        <button class="btn btn-gold" style="flex:2;height:44px" onclick="saveGeminiKey()">💾 Сохранить ключ</button>
+      </div>
+    </div>
+    <div class="divider"></div>
+    <div class="form-section">
       <div class="form-section-title">📦 Экспорт и импорт</div>
       <div class="io-grid">
         <button class="btn btn-gold" style="height:46px" onclick="exportData()">📤 Экспорт</button>
@@ -1428,6 +1600,18 @@ function resetCastingKw() {
   });
   saveCastingKw({ ...DEFAULT_CASTING_KW });
   toast('Сброшено', 'info');
+}
+
+function saveGeminiKey() {
+  const val = document.getElementById('gemini-key-inp')?.value.trim();
+  if (!val) { toast('Введите ключ','error'); return; }
+  localStorage.setItem('psbase-gemini-key', val);
+  toast('Ключ Gemini сохранён ✓','success');
+}
+function clearGeminiKey() {
+  localStorage.removeItem('psbase-gemini-key');
+  const inp = document.getElementById('gemini-key-inp'); if (inp) inp.value='';
+  toast('Ключ удалён','info');
 }
 
 async function doSignOut() {
