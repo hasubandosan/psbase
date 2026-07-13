@@ -775,7 +775,13 @@ async function renderAddEdit(id) {
     </div>
     <div class="form-section">
       <div class="form-section-title">✦ Основная информация</div>
-      <div class="form-group"><label class="form-label">Имя *</label><input class="form-input" id="f-name" value="${escHtml(m?.name||prefill?.name||'')}" placeholder="Имя или псевдоним"></div>
+      <div class="form-group">
+  <label class="form-label">Имя *</label>
+  <div style="display:flex;gap:8px">
+    <input class="form-input" id="f-name" style="flex:1" value="${escHtml(m?.name||prefill?.name||'')}" placeholder="Имя или псевдоним">
+    <button type="button" class="btn btn-gold" id="autofill-btn" style="flex-shrink:0;height:44px;padding:0 14px;white-space:nowrap" onclick="autoFillModel()">✦ Авто-заполнение</button>
+  </div>
+</div>
       <div class="form-group"><label class="form-label">Псевдонимы (через запятую)</label><input class="form-input" id="f-aliases" value="${escHtml(m?.aliases||'')}" placeholder="Псевдоним 1, Псевдоним 2"></div>
       <div class="form-group"><label class="form-label">Страна</label>
         <select class="form-input" id="f-country">
@@ -808,7 +814,7 @@ async function renderAddEdit(id) {
         <div class="ep-add"><input type="file" accept="image/*" id="extra-file" multiple><span>+</span></div>
       </div>
     </div>
-    <div class="form-section">
+    <div class="form-section" id="tags-form-section">
       <div class="form-section-title">🏷️ Теги</div>
       ${allTags.length
         ?`<div class="tags-selector" id="tags-sel">
@@ -1353,6 +1359,20 @@ async function renderSettings() {
     </div>
     <div class="divider"></div>
     <div class="form-section">
+    <div class="form-section-title">✦ Gemini API (авто-заполнение)</div>
+<p style="color:var(--text3);font-size:12px;line-height:1.6;margin-bottom:12px">
+  Ключ используется кнопкой «✦ Авто-заполнение»...
+</p>
+<div class="form-group">
+  <input class="form-input" type="password" id="gemini-key-inp" placeholder="AIza..." value="${escHtml(localStorage.getItem('psbase-gemini-key')||'')}">
+</div>
+<div style="display:flex;gap:10px;margin-top:10px">
+  <button class="btn btn-ghost" style="flex:1;height:44px" onclick="clearGeminiKey()">✕ Очистить</button>
+  <button class="btn btn-gold" style="flex:2;height:44px" onclick="saveGeminiKey()">💾 Сохранить ключ</button>
+</div>
+</div>
+<div class="divider"></div>
+<div class="form-section">
       <div class="form-section-title">📦 Экспорт и импорт</div>
       <div class="io-grid">
         <button class="btn btn-gold" style="height:46px" onclick="exportData()">📤 Экспорт</button>
