@@ -9,7 +9,36 @@ const State = {
   user: null,
   // Пагинация
   page: { current: 0, pageSize: 20, total: 0, allList: [], observer: null },
+  _modelCastingId: null,
+  _modelCastingPicks: {}, // slotKey -> { url, thumb, type:'url'|'upload' }
 };
+
+// ── Model Casting config ──────────────────────────────────────────
+const CASTING_SLOTS = [
+  { key: 'main',      label: '📷 Основное фото', aspect: NaN },
+  { key: 'face',      label: '😶 Лицо',          aspect: 1   },
+  { key: 'shoulders', label: '💪 Плечи',         aspect: 1   },
+  { key: 'waist',     label: '⌛ Талия',          aspect: 1   },
+  { key: 'hips',      label: '🍑 Бёдра',         aspect: 1   },
+  { key: 'figure',    label: '👤 Фигура',         aspect: NaN },
+];
+
+const DEFAULT_CASTING_KW = {
+  main:      'анфас',
+  face:      'лицо крупный план',
+  shoulders: 'плечи декольте',
+  waist:     'талия',
+  hips:      'бёдра',
+  figure:    'фигура полный рост',
+};
+
+function loadCastingKw()  {
+  try { return JSON.parse(localStorage.getItem('psbase-casting-kw') || 'null') || { ...DEFAULT_CASTING_KW }; }
+  catch { return { ...DEFAULT_CASTING_KW }; }
+}
+
+function saveCastingKw(kw) { localStorage.setItem('psbase-casting-kw', JSON.stringify(kw)); }
+
 
 // ── Toast ──────────────────────────────────────────────────────────
 function toast(msg, type='info', ms=2800) {
@@ -56,6 +85,7 @@ function nav(view, params={}) {
     bans:      renderBans,
     tags:      renderTagMgr,
     casting:   renderCasting,
+    'model-casting': () => renderModelCasting(State._modelCastingId)
   })[view]?.();
   window.scrollTo(0,0);
 }
@@ -593,7 +623,11 @@ async function renderDetail(id) {
         ${m.weight?`<div class="info-cell"><div class="ic-l">Вес</div><div class="ic-v">${m.weight} кг</div></div>`:''}
         ${m.shoulder_size?`<div class="info-cell"><div class="ic-l">Плечи</div><div class="ic-v">${m.shoulder_size}</div></div>`:''}
       </div>
-      <div class="sec-title">Оценки</div>
+      <div class="sec-title" style="display:flex;align-items:center;justify-content:space-between">
+  <span>Оценки</span>
+  <button class="btn btn-ghost" style="height:32px;font-size:12px;padding:0 12px"
+          onclick="openModelCasting(${id})">🎬 Кастинг фото</button>
+</div>
       <div class="bparts-detail">
         ${BP.map(p=>{
           const bppSrc=window.ImageKit?ImageKit.bpp(bpp[p]):bpp[p];
@@ -626,7 +660,7 @@ async function renderDetail(id) {
         </div><div style="margin-bottom:18px"></div>`:''}
       <div style="display:flex;gap:10px">
         <button class="btn btn-primary" style="flex:1;height:46px" onclick="editModel(${id})">✏️ Редактировать</button>
-        <button class="btn btn-ghost" style="height:46px;padding:0 14px" onclick="nav('casting')" title="Кастинг">🎬</button>
+        <button class="btn btn-ghost" style="height:46px;padding:0 14px" onclick="nav('casting')" title="Очередь кастинга">📋</button>
         <button class="btn btn-danger" style="height:46px;padding:0 14px" onclick="deleteModel(${id})">🗑</button>
       </div>
     </div>`;
@@ -1331,6 +1365,49 @@ async function renderSettings() {
       <div class="form-section-title">⚠️ Опасная зона</div>
       <button class="btn btn-danger" style="width:100%;height:44px" onclick="clearAll()">🗑 Очистить все данные</button>
     </div>`;
+
+    // Inject casting keywords editor
+const kw = loadCastingKw();
+const kwSection = document.createElement('div');
+kwSection.innerHTML = `<div class="divider"></div>
+  <div class="form-section">
+    <div class="form-section-title">🎬 Ключевые слова кастинга</div>
+    <p style="color:var(--text3);font-size:12px;line-height:1.6;margin-bottom:12px">
+      Добавляются к имени модели при поиске фото в кастинге
+    </p>
+    ${CASTING_SLOTS.map(s => `
+      <div class="weight-row">
+        <span class="weight-label" style="width:90px">${s.label}</span>
+        <input class="form-input" id="ckw-${s.key}" style="flex:1;height:36px"
+               value="${escHtml(kw[s.key] || '')}">
+      </div>`).join('')}
+    <div style="display:flex;gap:10px;margin-top:12px">
+      <button class="btn btn-ghost" style="flex:1;height:44px"
+              onclick="resetCastingKw()">↺ Сброс</button>
+      <button class="btn btn-gold" style="flex:2;height:44px"
+              onclick="saveCastingKwFromUI()">💾 Сохранить</button>
+    </div>
+  </div>`;
+  
+document.getElementById('view-settings').appendChild(kwSection);
+
+function saveCastingKwFromUI() {
+  const kw = {};
+  CASTING_SLOTS.forEach(s => {
+    kw[s.key] = document.getElementById('ckw-' + s.key)?.value.trim() || '';
+  });
+  saveCastingKw(kw);
+  toast('Ключевые слова сохранены', 'success');
+}
+
+function resetCastingKw() {
+  CASTING_SLOTS.forEach(s => {
+    const el = document.getElementById('ckw-' + s.key);
+    if (el) el.value = DEFAULT_CASTING_KW[s.key] || '';
+  });
+  saveCastingKw({ ...DEFAULT_CASTING_KW });
+  toast('Сброшено', 'info');
+}
 }
 
 async function doSignOut() {
@@ -1748,6 +1825,166 @@ async function castingBanModel() {
       renderCasting();
     }
   );
+}
+
+// ── MODEL CASTING ────────────────────────────────────────────────
+function openModelCasting(id) {
+  State._modelCastingId = id;
+  State._modelCastingPicks = {};
+  document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
+  document.getElementById('view-model-casting').classList.add('active');
+  State.view = 'model-casting';
+  renderModelCasting(id);
+}
+
+async function renderModelCasting(id) {
+  const m = await Models.getById(id);
+  if (!m) { nav('detail', { id: State.detailId }); return; }
+
+  const kw = loadCastingKw();
+
+  topBar(`
+    <button class="btn-icon" style="font-size:18px" onclick="nav('detail',{id:${id}})">←</button>
+    <span class="top-title" style="font-size:13px">🎬 ${escHtml(m.name)}</span>
+    <button class="btn btn-gold" style="height:32px;font-size:12px;padding:0 10px"
+            onclick="finishModelCasting(${id})">✓ Готово</button>`);
+
+  const v = document.getElementById('view-model-casting');
+  v.innerHTML = CASTING_SLOTS.map(s => `
+    <div class="mcast-slot" id="mcs-${s.key}">
+      <div class="mcast-slot-header">
+        <span class="mcast-slot-label">${s.label}</span>
+        <div class="mcast-pick-preview" id="mcp-${s.key}">
+          <img id="mcpi-${s.key}" src="">
+          <button class="mcast-clear-btn" onclick="clearMcastPick('${s.key}')">✕</button>
+        </div>
+      </div>
+      <div class="mcast-search-row">
+        <input class="form-input mcast-q" id="mcast-q-${s.key}"
+               value="${escHtml(m.name)} ${escHtml(kw[s.key] || '')}">
+        <button class="btn btn-ghost mcast-search-btn"
+                onclick="runMcastSlot('${s.key}')">🔍</button>
+      </div>
+      <div class="mcast-results" id="mcr-${s.key}">
+        <div class="loading"><div class="spinner"></div></div>
+      </div>
+    </div>`).join('') +
+    `<div class="mcast-finish-bar">
+       <button class="btn btn-gold" style="width:100%;height:50px;font-size:15px"
+               onclick="finishModelCasting(${id})">✓ Завершить кастинг</button>
+     </div>
+     <div style="height:24px"></div>`;
+
+  // Wire Enter key on each search input
+  CASTING_SLOTS.forEach(s => {
+    document.getElementById('mcast-q-' + s.key)
+      ?.addEventListener('keydown', e => { if (e.key === 'Enter') runMcastSlot(s.key); });
+  });
+
+  // Auto-search all slots in parallel
+  CASTING_SLOTS.forEach(s => runMcastSlot(s.key));
+}
+
+async function runMcastSlot(slotKey) {
+  const input  = document.getElementById('mcast-q-' + slotKey);
+  const resDiv = document.getElementById('mcr-' + slotKey);
+  if (!input || !resDiv) return;
+  const q = input.value.trim();
+  if (!q) return;
+
+  resDiv.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+  try {
+    const results = await DDGImages.search(q, 12);
+    resDiv.innerHTML = '';
+    if (!results.length) {
+      resDiv.innerHTML = '<div class="mcast-empty">Нет результатов</div>';
+      return;
+    }
+    const strip = document.createElement('div');
+    strip.className = 'mcast-strip';
+    const slot = CASTING_SLOTS.find(s => s.key === slotKey);
+    results.forEach(img => {
+      const card = document.createElement('div');
+      card.className = 'mcast-card';
+      card.innerHTML = `
+        <img src="${escHtml(img.thumb)}" loading="lazy"
+             onerror="this.parentElement.style.display='none'">
+        <div class="mcast-card-btns">
+          <button class="mcast-url-btn"
+            onclick="pickMcastPhoto('${slotKey}','${escHtml(img.full)}','${escHtml(img.thumb)}')">🔗</button>
+          <button class="mcast-crop-btn"
+            onclick="pickMcastPhoto('${slotKey}','${escHtml(img.full)}',${slot?.aspect ?? NaN})">✂</button>
+        </div>`;
+      card.querySelector('img').onclick = () => viewImg(img.full);
+      strip.appendChild(card);
+    });
+    resDiv.appendChild(strip);
+  } catch(e) {
+    resDiv.innerHTML = `<div class="mcast-empty">Ошибка: ${escHtml(e.message)}</div>`;
+  }
+}
+
+function pickMcastPhoto(slotKey, fullUrl, thumbUrl) {
+  State._modelCastingPicks[slotKey] = { url: fullUrl, thumb: thumbUrl, type: 'url' };
+  _updateMcastPreview(slotKey, thumbUrl || fullUrl);
+  // Подсветить выбранную карточку в стрипе
+  const resDiv = document.getElementById('mcr-' + slotKey);
+  resDiv?.querySelectorAll('.mcast-card').forEach(c => {
+    const u = c.querySelector('.mcast-url-btn')?.getAttribute('onclick') || '';
+    c.classList.toggle('mcast-selected', u.includes(fullUrl.slice(0, 40)));
+  });
+  toast('URL сохранён', 'success', 1400);
+}
+
+function pickMcastCrop(slotKey, fullUrl, aspect) {
+  openCropper(fullUrl, (croppedSrc) => {
+    State._modelCastingPicks[slotKey] = { url: croppedSrc, thumb: croppedSrc, type: 'upload' };
+    _updateMcastPreview(slotKey, croppedSrc);
+    toast('Обрезано и загружено', 'success', 1800);
+  }, isNaN(aspect) ? NaN : aspect);
+}
+
+function _updateMcastPreview(slotKey, src) {
+  const wrap = document.getElementById('mcp-' + slotKey);
+  const img  = document.getElementById('mcpi-' + slotKey);
+  if (!wrap || !img) return;
+  img.src = src;
+  wrap.classList.add('has-pick');
+}
+
+function clearMcastPick(slotKey) {
+  delete State._modelCastingPicks[slotKey];
+  const wrap = document.getElementById('mcp-' + slotKey);
+  const img  = document.getElementById('mcpi-' + slotKey);
+  if (wrap) wrap.classList.remove('has-pick');
+  if (img)  img.src = '';
+}
+
+async function finishModelCasting(id) {
+  const picks = State._modelCastingPicks || {};
+  const keys  = Object.keys(picks);
+  if (!keys.length) {
+    toast('Нет выбранных фото', 'info');
+    nav('detail', { id });
+    return;
+  }
+  const m = await Models.getById(id);
+  if (!m) return;
+
+  const update = {};
+  if (picks.main) update.main_photo = picks.main.url;
+
+  const bpp = { ...(m.body_part_photos || {}) };
+  ['face','shoulders','waist','hips','figure'].forEach(k => {
+    if (picks[k]) bpp[k] = picks[k].url;
+  });
+  update.body_part_photos = bpp;
+
+  await Models.update(id, update);
+  State._modelCastingPicks = {};
+  toast(`Обновлено ${keys.length} фото`, 'success');
+  State.detailId = id;
+  nav('detail', { id });
 }
 
 

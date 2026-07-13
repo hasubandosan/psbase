@@ -1107,6 +1107,93 @@ body::after {
   cursor: pointer; white-space: nowrap;
 }
 
+/* ── Model Casting View ─────────────────────────────────────────── */
+.mcast-slot {
+  border-bottom: 1px solid var(--border);
+  padding: 14px 16px 10px;
+}
+
+.mcast-slot-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.mcast-slot-label {
+  font-size: 13px; font-weight: 600; color: var(--text1);
+}
+
+/* preview thumb — hidden until a pick is made */
+.mcast-pick-preview {
+  display: none; align-items: center; gap: 6px;
+}
+
+.mcast-pick-preview.has-pick { display: flex; }
+
+.mcast-pick-preview img {
+  width: 44px; height: 44px; object-fit: cover;
+  border-radius: var(--r-sm); border: 2px solid var(--gold);
+}
+
+.mcast-clear-btn {
+  background: none; border: none; color: var(--text3);
+  font-size: 14px; cursor: pointer; padding: 4px;
+}
+
+.mcast-search-row {
+  display: flex; gap: 8px; align-items: center; margin-bottom: 10px;
+}
+
+.mcast-q { flex: 1; height: 36px; font-size: 13px; }
+
+.mcast-search-btn { height: 36px; padding: 0 10px; flex-shrink: 0; }
+
+.mcast-strip {
+  display: flex; gap: 8px; overflow-x: auto;
+  padding-bottom: 6px; scroll-snap-type: x mandatory;
+}
+
+.mcast-strip::-webkit-scrollbar { height: 3px; }
+
+.mcast-strip::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.mcast-card {
+  flex-shrink: 0; width: 110px;
+  border-radius: var(--r-sm); overflow: hidden;
+  border: 2px solid transparent;
+  background: var(--surface); scroll-snap-align: start;
+  transition: border-color var(--t);
+}
+
+.mcast-card.mcast-selected { border-color: var(--gold); }
+
+.mcast-card img {
+  width: 110px; height: 140px; object-fit: cover; display: block; cursor: pointer;
+}
+
+.mcast-card-btns {
+  display: flex; gap: 4px; padding: 4px;
+}
+
+.mcast-url-btn, .mcast-crop-btn {
+  flex: 1; height: 28px; border: none; border-radius: 4px;
+  font-size: 13px; cursor: pointer; background: var(--surface2); color: var(--text1);
+  transition: background var(--t);
+}
+
+.mcast-url-btn:active  { background: var(--accent); color: #fff; }
+
+.mcast-crop-btn:active { background: var(--gold); color: #000; }
+
+.mcast-empty {
+  color: var(--text3); font-size: 13px; padding: 12px 0; text-align: center;
+}
+
+.mcast-finish-bar {
+  position: sticky; bottom: 0;
+  background: var(--bg); padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+
 /* ── Casting queue screen ────────────────────────────────────────── */
 .cast-queue-stats {
   display: flex; gap: 12px; margin-bottom: 18px;
