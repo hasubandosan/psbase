@@ -1195,7 +1195,11 @@ async function fetchGeminiModelData(name) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
   });
-  if (!res.ok) throw new Error('HTTP_' + res.status);
+  if (!res.ok) {
+    if (res.status === 429) throw new Error('RATE_LIMIT');
+    if (res.status === 400 || res.status === 403) throw new Error('BAD_KEY');
+    throw new Error('HTTP_' + res.status);
+  }
   const data = await res.json();
   let text = (data?.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
   text = text.replace(/```json|```/g, '').trim();
@@ -1219,6 +1223,8 @@ async function autoFillModel() {
   } catch (e) {
     if (e.message === 'NO_KEY') toast('Укажите ключ Gemini API в Настройках', 'error');
     else if (e.message === 'BAD_JSON') toast('Не удалось разобрать ответ Gemini', 'error');
+    else if (e.message === 'RATE_LIMIT') toast('Gemini: превышен лимит запросов (429). Подождите немного и повторите, либо проверьте лимиты/биллинг ключа в Google AI Studio', 'error', 5000);
+    else if (e.message === 'BAD_KEY') toast('Gemini: ключ недействителен или нет доступа к модели', 'error', 5000);
     else toast('Ошибка запроса: ' + e.message, 'error');
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '✦ Авто-заполнение'; }
