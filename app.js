@@ -1158,10 +1158,16 @@ async function collectRatings() {
 }
 
 // ── Auto-fill (Gemini) ──────────────────────────────────────────────
-// Gemini API напрямую — gemini-2.5-flash доступна на free tier без карты
-// (1500 запросов/день, 15/мин). gemini-2.0-flash отключена Google 1 июня 2026 —
-// именно поэтому раньше был мгновенный 429 с limit:0.
-const GEMINI_MODEL = 'gemini-2.5-flash';
+// Gemini API напрямую, без карты. Список моделей на free tier у Google в 2026
+// меняется буквально каждые несколько недель (2.0 отключили, 2.5 то и дело
+// временно 404-ит, 3.5/flash-latest глючат с квотой) — поэтому вместо одной
+// жёстко зашитой модели пробуем по очереди несколько кандидатов.
+const GEMINI_MODEL_CANDIDATES = [
+  'gemini-2.5-flash',
+  'gemini-flash-latest',
+  'gemini-2.5-flash-lite',
+  'gemini-3-flash-preview',
+];
 
 function normalizeForMatch(s) {
   return String(s||'').toLowerCase().replace(/[^\p{L}\p{N}]+/gu,'').trim();
@@ -1178,7 +1184,33 @@ function matchCountry(name) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-async function fetchGeminiModelData(name, _attempt = 0) {
+// Один запрос к конкретной модели. Бросает специальные Error-коды,
+// по которым вызывающая сторона решает — пробовать следующую модель или нет.
+async function callGeminiModel(model, key, prompt, _attempt = 0) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+  });
+  if (!res.ok) {
+    if ((res.status === 503 || res.status === 502) && _attempt < 1) {
+      await sleep(1000 * (_attempt + 1));
+      return callGeminiModel(model, key, prompt, _attempt + 1);
+    }
+    if (res.status === 400 || res.status === 403) throw new Error('BAD_KEY'); // ключ — стоп сразу, модель не при чём
+    if (res.status === 404) throw new Error('MODEL_UNAVAILABLE:' + model);
+    if (res.status === 429) throw new Error('MODEL_RATE_LIMIT:' + model);
+    if (res.status === 503 || res.status === 502) throw new Error('MODEL_UNAVAILABLE:' + model);
+    throw new Error('MODEL_HTTP_' + res.status + ':' + model);
+  }
+  const data = await res.json();
+  let text = (data?.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
+  text = text.replace(/```json|```/g, '').trim();
+  try { return JSON.parse(text); } catch (e) { throw new Error('BAD_JSON'); }
+}
+
+async function fetchGeminiModelData(name) {
   const key = localStorage.getItem('psbase-gemini-key');
   if (!key) throw new Error('NO_KEY');
   const prompt = `Найди точные данные для модели/актрисы "${name}".
@@ -1194,29 +1226,18 @@ async function fetchGeminiModelData(name, _attempt = 0) {
   "aliases": "псевдонимы через запятую или null",
   "confidence": "high|medium|low"
 }`;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${key}`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
-  });
-  if (!res.ok) {
-    // 503/502 — сервер временно перегружен, транзиентная ошибка: пробуем ещё раз с задержкой
-    if ((res.status === 503 || res.status === 502) && _attempt < 2) {
-      await sleep(1000 * (_attempt + 1));
-      return fetchGeminiModelData(name, _attempt + 1);
+  let lastErr = null;
+  for (const model of GEMINI_MODEL_CANDIDATES) {
+    try {
+      return await callGeminiModel(model, key, prompt);
+    } catch (e) {
+      if (e.message === 'BAD_KEY' || e.message === 'BAD_JSON') throw e; // не связано с конкретной моделью — не имеет смысла пробовать другие
+      lastErr = e; // MODEL_UNAVAILABLE / MODEL_RATE_LIMIT / MODEL_HTTP_* — пробуем следующую модель
     }
-    if (res.status === 503 || res.status === 502) throw new Error('UNAVAILABLE');
-    if (res.status === 429) throw new Error('RATE_LIMIT');
-    if (res.status === 400 || res.status === 403) throw new Error('BAD_KEY');
-    throw new Error('HTTP_' + res.status);
   }
-  const data = await res.json();
-  let text = (data?.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
-  text = text.replace(/```json|```/g, '').trim();
-  let parsed;
-  try { parsed = JSON.parse(text); } catch (e) { throw new Error('BAD_JSON'); }
-  return parsed;
+  // Все кандидаты отказали
+  if (lastErr?.message?.startsWith('MODEL_RATE_LIMIT')) throw new Error('RATE_LIMIT');
+  throw new Error('ALL_MODELS_UNAVAILABLE');
 }
 
 async function autoFillModel() {
@@ -1234,9 +1255,9 @@ async function autoFillModel() {
   } catch (e) {
     if (e.message === 'NO_KEY') toast('Укажите ключ Gemini API в Настройках', 'error');
     else if (e.message === 'BAD_JSON') toast('Не удалось разобрать ответ Gemini', 'error');
-    else if (e.message === 'RATE_LIMIT') toast('Gemini: превышен лимит 15 запросов/мин или 1500/день. Подождите и повторите', 'error', 5000);
+    else if (e.message === 'RATE_LIMIT') toast('Gemini: превышен лимит запросов на всех проверенных моделях. Подождите и повторите', 'error', 5000);
     else if (e.message === 'BAD_KEY') toast('Gemini: ключ недействителен или не хватает доступа к модели', 'error', 5000);
-    else if (e.message === 'UNAVAILABLE') toast('Gemini: сервер временно перегружен (503). Попробуйте ещё раз через минуту', 'error', 5000);
+    else if (e.message === 'ALL_MODELS_UNAVAILABLE') toast('Gemini: ни одна из известных моделей сейчас не отвечает. Похоже на временный сбой у Google — попробуйте позже', 'error', 5500);
     else toast('Ошибка запроса: ' + e.message, 'error');
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '✦ Авто-заполнение'; }
