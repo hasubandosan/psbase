@@ -1158,7 +1158,10 @@ async function collectRatings() {
 }
 
 // ── Auto-fill (Gemini) ──────────────────────────────────────────────
-const GEMINI_MODEL = 'gemini-3.5-flash';
+// Gemini API напрямую — gemini-2.5-flash доступна на free tier без карты
+// (1500 запросов/день, 15/мин). gemini-2.0-flash отключена Google 1 июня 2026 —
+// именно поэтому раньше был мгновенный 429 с limit:0.
+const GEMINI_MODEL = 'gemini-2.5-flash';
 
 function normalizeForMatch(s) {
   return String(s||'').toLowerCase().replace(/[^\p{L}\p{N}]+/gu,'').trim();
@@ -1173,7 +1176,9 @@ function matchCountry(name) {
   return found ? found.name : '';
 }
 
-async function fetchGeminiModelData(name) {
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function fetchGeminiModelData(name, _attempt = 0) {
   const key = localStorage.getItem('psbase-gemini-key');
   if (!key) throw new Error('NO_KEY');
   const prompt = `Найди точные данные для модели/актрисы "${name}".
@@ -1196,6 +1201,12 @@ async function fetchGeminiModelData(name) {
     body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
   });
   if (!res.ok) {
+    // 503/502 — сервер временно перегружен, транзиентная ошибка: пробуем ещё раз с задержкой
+    if ((res.status === 503 || res.status === 502) && _attempt < 2) {
+      await sleep(1000 * (_attempt + 1));
+      return fetchGeminiModelData(name, _attempt + 1);
+    }
+    if (res.status === 503 || res.status === 502) throw new Error('UNAVAILABLE');
     if (res.status === 429) throw new Error('RATE_LIMIT');
     if (res.status === 400 || res.status === 403) throw new Error('BAD_KEY');
     throw new Error('HTTP_' + res.status);
@@ -1223,8 +1234,9 @@ async function autoFillModel() {
   } catch (e) {
     if (e.message === 'NO_KEY') toast('Укажите ключ Gemini API в Настройках', 'error');
     else if (e.message === 'BAD_JSON') toast('Не удалось разобрать ответ Gemini', 'error');
-    else if (e.message === 'RATE_LIMIT') toast('Gemini: превышен лимит запросов (429). Подождите немного и повторите, либо проверьте лимиты/биллинг ключа в Google AI Studio', 'error', 5000);
-    else if (e.message === 'BAD_KEY') toast('Gemini: ключ недействителен или нет доступа к модели', 'error', 5000);
+    else if (e.message === 'RATE_LIMIT') toast('Gemini: превышен лимит 15 запросов/мин или 1500/день. Подождите и повторите', 'error', 5000);
+    else if (e.message === 'BAD_KEY') toast('Gemini: ключ недействителен или не хватает доступа к модели', 'error', 5000);
+    else if (e.message === 'UNAVAILABLE') toast('Gemini: сервер временно перегружен (503). Попробуйте ещё раз через минуту', 'error', 5000);
     else toast('Ошибка запроса: ' + e.message, 'error');
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '✦ Авто-заполнение'; }
@@ -1540,7 +1552,7 @@ async function renderSettings() {
     <div class="divider"></div>
     <div class="form-section">
       <div class="form-section-title">✦ Gemini API (авто-заполнение)</div>
-      <p style="color:var(--text3);font-size:12px;line-height:1.6;margin-bottom:12px">Ключ используется кнопкой «✦ Авто-заполнение» в форме модели, чтобы находить дату рождения, страну, параметры и теги по имени. Хранится только локально на устройстве.</p>
+      <p style="color:var(--text3);font-size:12px;line-height:1.6;margin-bottom:12px">Ключ используется кнопкой «✦ Авто-заполнение» в форме модели, чтобы находить дату рождения, страну, параметры и теги по имени. Бесплатный ключ без карты — на <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:var(--accent-light)">aistudio.google.com/app/apikey</a>. Хранится только локально на устройстве.</p>
       <div class="form-group">
         <input class="form-input" type="password" id="gemini-key-inp" placeholder="AIza..." value="${escHtml(localStorage.getItem('psbase-gemini-key')||'')}">
       </div>
