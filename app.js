@@ -1158,7 +1158,7 @@ async function collectRatings() {
 }
 
 // ── Auto-fill (Gemini) ──────────────────────────────────────────────
-const GEMINI_MODEL = 'gemini-2.0-flash';
+const GEMINI_MODEL = 'gemini-3.5-flash';
 
 function normalizeForMatch(s) {
   return String(s||'').toLowerCase().replace(/[^\p{L}\p{N}]+/gu,'').trim();
