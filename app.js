@@ -1388,7 +1388,7 @@ kwSection.innerHTML = `<div class="divider"></div>
               onclick="saveCastingKwFromUI()">💾 Сохранить</button>
     </div>
   </div>`;
-  
+
 document.getElementById('view-settings').appendChild(kwSection);
 
 function saveCastingKwFromUI() {
@@ -1831,8 +1831,18 @@ async function castingBanModel() {
 function openModelCasting(id) {
   State._modelCastingId = id;
   State._modelCastingPicks = {};
+  
+  // Ensure view element exists (may be missing if index.html not updated)
+  let vEl = document.getElementById('view-model-casting');
+  if (!vEl) {
+    vEl = document.createElement('main');
+    vEl.className = 'view';
+    vEl.id = 'view-model-casting';
+    document.getElementById('app').insertBefore(vEl, document.querySelector('.bottom-nav'));
+  }
+  
   document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
-  document.getElementById('view-model-casting').classList.add('active');
+  vEl.classList.add('active');
   State.view = 'model-casting';
   renderModelCasting(id);
 }
