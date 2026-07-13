@@ -1865,9 +1865,9 @@ async function renderModelCasting(id) {
       <div class="mcast-slot-header">
         <span class="mcast-slot-label">${s.label}</span>
         <div class="mcast-pick-preview" id="mcp-${s.key}">
-          <img id="mcpi-${s.key}" src="">
-          <button class="mcast-clear-btn" onclick="clearMcastPick('${s.key}')">✕</button>
-        </div>
++          <img id="mcpi-${s.key}">
++          <button class="mcast-clear-btn" onclick="clearMcastPick('${s.key}')">✕</button>
++        </div>
       </div>
       <div class="mcast-search-row">
         <input class="form-input mcast-q" id="mcast-q-${s.key}"
@@ -1981,16 +1981,18 @@ async function finishModelCasting(id) {
   const m = await Models.getById(id);
   if (!m) return;
 
-  const update = {};
-  if (picks.main) update.main_photo = picks.main.url;
+  // Patch only photo fields — bypass Models.update (which requires full model + recalculates scores)
+const patch = {};
+if (picks.main) patch.main_photo = picks.main.url;
 
-  const bpp = { ...(m.body_part_photos || {}) };
-  ['face','shoulders','waist','hips','figure'].forEach(k => {
-    if (picks[k]) bpp[k] = picks[k].url;
-  });
-  update.body_part_photos = bpp;
+const bpp = { ...(m.body_part_photos || {}) };
+['face','shoulders','waist','hips','figure'].forEach(k => {
+  if (picks[k]) bpp[k] = picks[k].url;
+});
+patch.body_part_photos = bpp;
 
-  await Models.update(id, update);
+await db.models.update(id, patch);  // прямое обновление, без checkDuplicate и пересчёта
+
   State._modelCastingPicks = {};
   toast(`Обновлено ${keys.length} фото`, 'success');
   State.detailId = id;
